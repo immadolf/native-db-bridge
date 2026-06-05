@@ -1,0 +1,36 @@
+# --- 运行态文件（设计文档要求整体忽略） ---
+var/
+
+# --- Go 构建产物 ---
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+native-db-bridge
+native-db-bridge-mcp
+
+# --- Go 测试与覆盖率 ---
+*.test
+*.out
+coverage.html
+coverage.txt
+
+# --- Go 模块缓存 ---
+vendor/
+
+# --- IDE ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# --- macOS ---
+.DS_Store
+
+# --- 环境与密钥 ---
+.env
+.env.*
+*.pem
+*.key
