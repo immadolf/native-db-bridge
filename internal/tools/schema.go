@@ -2,7 +2,7 @@
 // for the native-db-bridge MCP server.
 package tools
 
-// ToolNames returns the complete list of all 25 MCP tool names.
+// ToolNames returns the complete list of all 24 MCP tool names.
 func ToolNames() []string {
 	return []string{
 		// Metadata tools
