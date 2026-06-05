@@ -1,0 +1,108 @@
+# native-db-bridge-mcp example configuration
+#
+# Copy this file to var/config.yaml and replace placeholder credentials.
+# The real config file MUST have mode 0600:
+#   chmod 600 var/config.yaml
+
+server:
+  listen: "127.0.0.1:38987"
+  mcp_path: "/mcp"
+  transport: "streamable_http"
+  client_token: "replace-with-openssl-rand-hex-32"
+  request_timeout: "60s"
+  query_timeout: "30s"
+  max_result_rows: 1000
+  redis_scan_count_max: 500
+
+policy:
+  allowed_environments:
+    - dev
+    - support
+  production_enabled: false
+  confirm_all_writes: true
+  reject_write_without_confirmation: true
+  confirmation_ttl: "10m"
+  confirmation_expire_scan_interval: "1m"
+
+connection_lifecycle:
+  defaults:
+    lazy_connect: true
+    idle_ttl: "10m"
+    close_scan_interval: "1m"
+    connect_timeout: "5s"
+  sql:
+    idle_ttl: "10m"
+  redis:
+    idle_ttl: "5m"
+  mongo:
+    idle_ttl: "10m"
+
+storage:
+  sqlite_path: "./audit.db"
+  log_path: "./logs/server.log"
+
+connections:
+  sql:
+    - name: "mysql-dev-main"
+      environment: "dev"
+      driver: "mysql"
+      dsn: "dev_user:dev_password@tcp(db-dev.example.com:3306)/?parseTime=true&charset=utf8mb4"
+      pool:
+        max_open_conns: 5
+        max_idle_conns: 2
+        conn_max_lifetime: "30m"
+
+    - name: "mysql-support-main"
+      environment: "support"
+      driver: "mysql"
+      dsn: "support_user:support_password@tcp(db-support.example.com:3306)/?parseTime=true&charset=utf8mb4"
+
+  redis:
+    - name: "redis-support-main"
+      environment: "support"
+      address: "redis-support.example.com:6379"
+      username: ""
+      password: "replace-with-redis-password"
+      tls: false
+
+  mongo:
+    - name: "mongo-support-main"
+      environment: "support"
+      uri: "mongodb://mongo_user:mongo_password@mongo-support.example.com:27017"
+
+datasources:
+  sql:
+    - name: "saas_dev"
+      environment: "dev"
+      connection: "mysql-dev-main"
+      default_database: "saas_dev"
+
+    - name: "saas_support"
+      environment: "support"
+      connection: "mysql-support-main"
+      default_database: "saas_support"
+
+  redis:
+    - name: "saas-auth-support"
+      environment: "support"
+      connection: "redis-support-main"
+      db: 0
+      service: "saas-auth"
+
+    - name: "saas-web-bff-support"
+      environment: "support"
+      connection: "redis-support-main"
+      db: 1
+      service: "saas-web-bff"
+
+    - name: "channel-msg-support"
+      environment: "support"
+      connection: "redis-support-main"
+      db: 2
+      service: "channel-msg"
+
+  mongo:
+    - name: "saas-support-mongo"
+      environment: "support"
+      connection: "mongo-support-main"
+      default_database: "saas_support"

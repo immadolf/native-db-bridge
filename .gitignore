@@ -7,8 +7,8 @@ var/
 *.dll
 *.so
 *.dylib
-native-db-bridge
-native-db-bridge-mcp
+/native-db-bridge
+/native-db-bridge-mcp
 
 # --- Go 测试与覆盖率 ---
 *.test
