@@ -6,7 +6,7 @@
 
 **Architecture:** 服务按 `config -> audit -> policy -> lifecycle -> backend -> tools -> server` 分层。所有业务数据源懒加载，所有写操作通过 SQLite confirmation 两阶段确认，MCP 层只暴露工具契约，不直接执行写操作。
 
-**Tech Stack:** Go 1.23+、官方 MCP Go SDK、`modernc.org/sqlite`、`gopkg.in/yaml.v3`、`github.com/go-sql-driver/mysql`、`github.com/redis/go-redis/v9`、`go.mongodb.org/mongo-driver/mongo`、SQL parser、macOS launchd。
+**Tech Stack:** Go 1.23+、官方 MCP Go SDK、`modernc.org/sqlite`、`gopkg.in/yaml.v3`、`github.com/go-sql-driver/mysql`、`github.com/redis/go-redis/v9`、`go.mongodb.org/mongo-driver/mongo`、`github.com/xwb1989/sqlparser`、macOS launchd。
 
 ---
 
@@ -40,6 +40,8 @@
   internal/lifecycle/manager_test.go
   internal/model/model.go
   internal/nbderrors/errors.go
+  internal/ops/tracker.go
+  internal/ops/tracker_test.go
   internal/policy/mongo.go
   internal/policy/mongo_test.go
   internal/policy/redis.go
@@ -55,7 +57,6 @@
   internal/tools/schema_test.go
   testdata/config/valid.yaml
   testdata/config/invalid-prod.yaml
-  testdata/config/too-open.yaml
   .gitignore
   go.mod
 ```
@@ -246,6 +247,22 @@ func TestRejectTooOpenConfigPermissions(t *testing.T) {
 	_, err = Load(path)
 	if err == nil {
 		t.Fatalf("Load() expected permission error")
+	}
+}
+
+func TestRejectGroupReadableConfigPermissions(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data, err := os.ReadFile(filepath.Join("..", "..", "testdata", "config", "valid.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0640); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Load(path)
+	if err == nil {
+		t.Fatalf("Load() expected group-readable permission error")
 	}
 }
 ```
@@ -578,6 +595,7 @@ Create `/Users/repairman/opt/native-db-bridge/internal/audit/store_test.go`:
 package audit
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -592,6 +610,13 @@ func TestOpenCreatesDatabaseAndMigrates(t *testing.T) {
 	defer store.Close()
 	if err := store.CheckSchema(); err != nil {
 		t.Fatalf("CheckSchema() error=%v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Fatalf("audit.db mode=%#o, want 0600", got)
 	}
 }
 
@@ -622,6 +647,45 @@ func TestConfirmationLifecycle(t *testing.T) {
 	}
 	if got.Summary != conf.Summary {
 		t.Fatalf("summary=%q", got.Summary)
+	}
+}
+
+func TestExecuteConfirmationCanWinOnlyOnce(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	conf := Confirmation{
+		ID:          "conf_race",
+		Kind:        "sql_dml",
+		Datasource:  "saas_support",
+		PayloadJSON: `{"sql":"UPDATE t SET a=1 WHERE id=1"}`,
+		PayloadHash: "hash",
+		Summary:     "UPDATE t ...",
+		RiskLevel:   "medium",
+		ImpactJSON:  `{"mode":"estimated","rows":1}`,
+		Status:      "pending",
+		ExpiresAt:   time.Now().Add(time.Minute),
+	}
+	if err := store.CreateConfirmation(conf); err != nil {
+		t.Fatal(err)
+	}
+	const workers = 8
+	results := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			results <- store.MarkConfirmationExecuting("conf_race")
+		}()
+	}
+	success := 0
+	for i := 0; i < workers; i++ {
+		if err := <-results; err == nil {
+			success++
+		}
+	}
+	if success != 1 {
+		t.Fatalf("success=%d, want 1", success)
 	}
 }
 ```
@@ -690,7 +754,8 @@ Create indexes for `created_at`, `datasource`, `confirmation_id`, `status`.
 
 Open rules:
 
-- create missing db with mode `0600`
+- create missing db by first calling `os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)`, closing that file, then opening it through `database/sql`
+- if `sql.Open` or migration creates any file with broader permission, immediately `os.Chmod(path, 0600)` before returning from `Open`
 - reject existing db if group/others bits are set
 - run `PRAGMA integrity_check`
 - enable WAL
@@ -738,10 +803,21 @@ func TestClassifySQLQuery(t *testing.T) {
 	}{
 		{"select", "SELECT * FROM t", true},
 		{"show", "SHOW TABLES", true},
+		{"desc", "DESC t", true},
+		{"describe", "DESCRIBE t", true},
+		{"explain", "EXPLAIN SELECT * FROM t", true},
 		{"update", "UPDATE t SET a=1", false},
 		{"multi", "SELECT 1; DROP TABLE t", false},
 		{"for update", "SELECT * FROM t FOR UPDATE", false},
+		{"lock in share mode", "SELECT * FROM t LOCK IN SHARE MODE", false},
 		{"load file", "SELECT LOAD_FILE('/etc/passwd')", false},
+		{"into outfile", "SELECT * FROM t INTO OUTFILE '/tmp/x'", false},
+		{"into dumpfile", "SELECT * FROM t INTO DUMPFILE '/tmp/x'", false},
+		{"use", "USE other_db", false},
+		{"lock", "LOCK TABLES t WRITE", false},
+		{"unlock", "UNLOCK TABLES", false},
+		{"call", "CALL p()", false},
+		{"set", "SET @a=1", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -790,6 +866,33 @@ func TestMongoAggregateStages(t *testing.T) {
 		}
 	}
 }
+
+func TestMongoWriteMatrix(t *testing.T) {
+	cases := []struct {
+		name         string
+		operation    string
+		hasFilter    bool
+		hasDocument  bool
+		hasDocuments bool
+		want         bool
+	}{
+		{"insertOne ok", "insertOne", false, true, false, true},
+		{"insertOne rejects filter", "insertOne", true, true, false, false},
+		{"insertMany ok", "insertMany", false, false, true, true},
+		{"updateOne ok", "updateOne", true, true, false, true},
+		{"deleteMany ok", "deleteMany", true, false, false, true},
+		{"dropCollection ok", "dropCollection", false, false, false, true},
+		{"dropCollection rejects filter", "dropCollection", true, false, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ValidateMongoWrite(tc.operation, tc.hasFilter, tc.hasDocument, tc.hasDocuments)
+			if got != tc.want {
+				t.Fatalf("ValidateMongoWrite=%v, want %v", got, tc.want)
+			}
+		})
+	}
+}
 ```
 
 - [ ] **Step 4: 实现 policy**
@@ -804,7 +907,7 @@ Implement:
 - `IsMongoAggregateStageAllowed(stage string) bool`
 - `ValidateMongoWrite(operation string, hasFilter bool, hasDocument bool, hasDocuments bool) bool`
 
-Use a SQL parser package to classify statements. If parser cannot parse MySQL DDL in a narrow case, return unsafe/rejected.
+Use `github.com/xwb1989/sqlparser` to classify statements. If parser cannot parse a MySQL statement, return unsafe/rejected. Do not fall back to prefix matching.
 
 - [ ] **Step 5: 验证**
 
@@ -836,7 +939,7 @@ git commit -m "feat(policy): 实现数据库操作安全分类" \
 func TestManagerLazyLoadsAndClosesIdle(t *testing.T) {
 	created := 0
 	closed := 0
-	m := NewManager[string](time.Millisecond, func(ctx context.Context, key string) (Resource, error) {
+	m := NewManager[string](time.Minute, func(ctx context.Context, key string) (Resource, error) {
 		created++
 		return ResourceFunc(func() error { closed++; return nil }), nil
 	})
@@ -849,10 +952,25 @@ func TestManagerLazyLoadsAndClosesIdle(t *testing.T) {
 		t.Fatalf("created=%d", created)
 	}
 	release()
-	time.Sleep(2 * time.Millisecond)
-	m.CloseIdle(time.Now())
+	m.CloseIdle(time.Now().Add(2 * time.Minute))
 	if closed != 1 {
 		t.Fatalf("closed=%d", closed)
+	}
+}
+
+func TestManagerDoesNotCloseInFlightResource(t *testing.T) {
+	closed := 0
+	m := NewManager[string](time.Minute, func(ctx context.Context, key string) (Resource, error) {
+		return ResourceFunc(func() error { closed++; return nil }), nil
+	})
+	release, err := m.Acquire(context.Background(), "saas_support")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	m.CloseIdle(time.Now().Add(2 * time.Minute))
+	if closed != 0 {
+		t.Fatalf("closed in-flight resource")
 	}
 }
 ```
@@ -902,18 +1020,26 @@ Create interfaces:
 
 ```go
 type SQLBackend interface {
+	Ping(ctx context.Context, datasource string) error
 	Query(ctx context.Context, datasource string, sql string, limit int) (SQLResult, error)
 	Exec(ctx context.Context, datasource string, sql string) (ExecResult, error)
 	PreviewTable(ctx context.Context, datasource, schema, table string, limit int) (SQLResult, error)
 }
 
 type RedisBackend interface {
+	Ping(ctx context.Context, datasource string) error
 	Command(ctx context.Context, datasource, command string, args []string) (RedisResult, error)
+	ScanKeys(ctx context.Context, datasource, match, cursor string, count int) (RedisScanResult, error)
+	KeyDescribe(ctx context.Context, datasource, key string) (RedisKeyDescription, error)
 }
 
 type MongoBackend interface {
+	Ping(ctx context.Context, datasource string) error
 	Find(ctx context.Context, req MongoFindRequest) (MongoResult, error)
 	Write(ctx context.Context, req MongoWriteRequest) (ExecResult, error)
+	ListDatabases(ctx context.Context, datasource string) ([]string, error)
+	ListCollections(ctx context.Context, datasource, pattern string) ([]MongoCollection, error)
+	DescribeCollection(ctx context.Context, datasource, collection string) (MongoCollectionDescription, error)
 }
 ```
 
@@ -948,6 +1074,8 @@ git commit -m "feat(backend): 定义数据库执行后端接口" \
 - Create: `/Users/repairman/opt/native-db-bridge/internal/tools/schema_test.go`
 - Create: `/Users/repairman/opt/native-db-bridge/internal/tools/handlers.go`
 - Create: `/Users/repairman/opt/native-db-bridge/internal/tools/handlers_test.go`
+- Create: `/Users/repairman/opt/native-db-bridge/internal/ops/tracker.go`
+- Create: `/Users/repairman/opt/native-db-bridge/internal/ops/tracker_test.go`
 
 - [ ] **Step 1: 写 schema 测试**
 
@@ -993,9 +1121,220 @@ func TestSQLPrepareCreatesConfirmationWithoutExecuting(t *testing.T) {
 }
 ```
 
+Add tests for diagnostics and safety handlers:
+
+```go
+type testHandlers struct {
+	*Handlers
+	fakeSQL   *fakeSQLBackend
+	fakeRedis *fakeRedisBackend
+	fakeMongo *fakeMongoBackend
+}
+
+func newTestHandlers(t *testing.T) *testHandlers {
+	t.Helper()
+	store, err := audit.Open(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	cfg := config.Config{
+		Server: config.ServerConfig{QueryTimeout: 30 * time.Second, MaxResultRows: 1000, RedisScanCountMax: 500},
+	}
+	sqlBackend := &fakeSQLBackend{}
+	redisBackend := &fakeRedisBackend{}
+	mongoBackend := &fakeMongoBackend{}
+	handlers := NewHandlers(Deps{
+		Config: cfg,
+		Audit: store,
+		SQL:   sqlBackend,
+		Redis: redisBackend,
+		Mongo: mongoBackend,
+		Ops:   ops.NewTracker(),
+	})
+	return &testHandlers{Handlers: handlers, fakeSQL: sqlBackend, fakeRedis: redisBackend, fakeMongo: mongoBackend}
+}
+
+func TestCancelConfirmationOnlyCancelsPending(t *testing.T) {
+	h := newTestHandlers(t)
+	out, err := h.SQLPrepareChange(context.Background(), SQLPrepareChangeInput{
+		Datasource: "saas_support",
+		SQL:        "UPDATE tc_org SET name='x' WHERE id=1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelled, err := h.CancelConfirmation(context.Background(), CancelConfirmationInput{ConfirmationID: out.ConfirmationID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cancelled.Status != "cancelled" {
+		t.Fatalf("status=%s", cancelled.Status)
+	}
+	if _, err := h.ExecuteConfirmation(context.Background(), ExecuteConfirmationInput{ConfirmationID: out.ConfirmationID}); err == nil {
+		t.Fatalf("cancelled confirmation must not execute")
+	}
+}
+
+func TestDatasourceListFiltersByTypeAndEnvironment(t *testing.T) {
+	h := newTestHandlers(t)
+	out, err := h.DatasourceList(context.Background(), DatasourceListInput{Type: "redis", Environment: "support"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ds := range out.Datasources {
+		if ds.Type != "redis" || ds.Environment != "support" {
+			t.Fatalf("unexpected datasource %+v", ds)
+		}
+	}
+}
+
+func TestAuditRecentFiltersByDatasource(t *testing.T) {
+	h := newTestHandlers(t)
+	if _, err := h.SQLQuery(context.Background(), SQLQueryInput{Datasource: "saas_support", SQL: "SELECT 1"}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := h.AuditRecent(context.Background(), AuditRecentInput{Datasource: "saas_support", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Events) == 0 {
+		t.Fatalf("expected audit events")
+	}
+}
+
+func TestOperationListFiltersStatus(t *testing.T) {
+	h := newTestHandlers(t)
+	out, err := h.OperationList(context.Background(), OperationListInput{Status: "running", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range out.Operations {
+		if op.Status != "running" {
+			t.Fatalf("unexpected operation status %s", op.Status)
+		}
+	}
+}
+
+func TestRedisKeyScanCapsCount(t *testing.T) {
+	h := newTestHandlers(t)
+	out, err := h.RedisKeyScan(context.Background(), RedisKeyScanInput{
+		Datasource: "saas-auth-support",
+		Match:      "*",
+		Count:      999999,
+		Cursor:     "0",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.RequestedCount > h.Config.Server.RedisScanCountMax {
+		t.Fatalf("scan count was not capped")
+	}
+}
+
+func TestCancelOperationCallsTracker(t *testing.T) {
+	h := newTestHandlers(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	h.Ops.Register("op_cancel", cancel)
+	out, err := h.CancelOperation(context.Background(), CancelOperationInput{OperationID: "op_cancel"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != "cancel_requested" {
+		t.Fatalf("status=%s", out.Status)
+	}
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatalf("operation context was not cancelled")
+	}
+}
+
+func TestCancelOperationRejectsMissingOperation(t *testing.T) {
+	h := newTestHandlers(t)
+	_, err := h.CancelOperation(context.Background(), CancelOperationInput{OperationID: "op_missing"})
+	if err == nil {
+		t.Fatalf("expected OPERATION_NOT_FOUND")
+	}
+}
+```
+
 - [ ] **Step 3: 实现工具 schema 与 handler**
 
 Implement Go structs for every input/output in the design doc. Handler methods call policy first, then audit/backend.
+
+Implement `/Users/repairman/opt/native-db-bridge/internal/ops/tracker.go`:
+
+```go
+package ops
+
+import (
+	"context"
+	"sync"
+)
+
+type Tracker struct {
+	mu      sync.Mutex
+	cancels map[string]context.CancelFunc
+}
+
+func NewTracker() *Tracker {
+	return &Tracker{cancels: map[string]context.CancelFunc{}}
+}
+
+func (t *Tracker) Register(operationID string, cancel context.CancelFunc) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.cancels[operationID] = cancel
+}
+
+func (t *Tracker) Cancel(operationID string) bool {
+	t.mu.Lock()
+	cancel, ok := t.cancels[operationID]
+	if ok {
+		delete(t.cancels, operationID)
+	}
+	t.mu.Unlock()
+	if ok {
+		cancel()
+	}
+	return ok
+}
+
+func (t *Tracker) Finish(operationID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.cancels, operationID)
+}
+```
+
+Create `/Users/repairman/opt/native-db-bridge/internal/ops/tracker_test.go`:
+
+```go
+package ops
+
+import (
+	"context"
+	"testing"
+)
+
+func TestTrackerCancelCallsCancelFuncOnce(t *testing.T) {
+	tracker := NewTracker()
+	ctx, cancel := context.WithCancel(context.Background())
+	tracker.Register("op_1", cancel)
+	if !tracker.Cancel("op_1") {
+		t.Fatalf("first cancel should find operation")
+	}
+	if tracker.Cancel("op_1") {
+		t.Fatalf("second cancel should not find operation")
+	}
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatalf("context was not cancelled")
+	}
+}
+```
 
 Start with:
 
@@ -1055,6 +1394,10 @@ Rules:
 - lazy open via lifecycle manager
 - set pool options from config
 - queries use context timeout
+- if caller omits limit, use `server.max_result_rows`
+- if caller passes limit above `server.max_result_rows`, cap it
+- apply limit by wrapping read SQL as `SELECT * FROM (<original>) AS ndb_limited LIMIT ?` when parser says the original query has no limit; if the original query already has a stricter limit, keep it
+- never append raw user-provided limit text to SQL
 
 - [ ] **Step 3: 实现 Redis backend**
 
@@ -1066,6 +1409,8 @@ Rules:
 - client `DB` fixed to namespace `db`
 - `SELECT` never sent
 - lazy open via lifecycle manager
+- `ScanKeys` uses Redis SCAN and caps count at `server.redis_scan_count_max`
+- `KeyDescribe` combines EXISTS, TYPE, PTTL and type-specific length commands
 
 - [ ] **Step 4: 实现 Mongo backend**
 
@@ -1077,6 +1422,8 @@ Rules:
 - database fixed to `default_database`
 - no database override
 - aggregate stage whitelist checked before backend call
+- implement Mongo metadata methods with `ListCollectionNames`, `Indexes().List`, and a bounded sample query using `limit=20`
+- `ListDatabases` returns datasource `default_database` in v1; it does not enumerate server-wide databases
 
 - [ ] **Step 5: 验证**
 
@@ -1106,6 +1453,15 @@ git commit -m "feat(backend): 接入 SQL Redis Mongo 原生驱动" \
 - Create: `/Users/repairman/opt/native-db-bridge/internal/server/http_test.go`
 
 - [ ] **Step 1: 写鉴权测试**
+
+Before writing code, confirm the official Go MCP SDK version and Streamable HTTP support:
+
+```bash
+go list -m -versions github.com/modelcontextprotocol/go-sdk
+go doc github.com/modelcontextprotocol/go-sdk/mcp
+```
+
+Expected: identify the current SDK module path and Streamable HTTP server API. If the official SDK module path or API differs, keep the difference inside `internal/server/mcp.go` and do not change policy/backend/tool interfaces.
 
 ```go
 func TestBearerTokenAuth(t *testing.T) {
@@ -1428,6 +1784,7 @@ git commit -m "test(integration): 增加数据库桥接集成验收" \
 - MCP tool schema 和 handler：Task 8。
 - Streamable HTTP 和 token：Task 10。
 - confirmation 状态机、取消、审计：Task 4、Task 8。
+- operation tracker 和 cancel function 管理：Task 8。
 - 集成测试和验收：Task 13。
 
 ### 占位符扫描
