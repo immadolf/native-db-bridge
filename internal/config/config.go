@@ -16,11 +16,8 @@ const (
 	allowedTransport = "streamable_http"
 )
 
-// allowedEnvironments defines the set of permitted datasource environments.
-var allowedEnvironments = map[string]bool{
-	"dev":     true,
-	"support": true,
-}
+// defaultAllowedEnvironments is the fallback when config omits allowed_environments.
+var defaultAllowedEnvironments = []string{"dev", "support"}
 
 // Load reads, parses, and validates the configuration from the given path.
 func Load(path string) (*Config, error) {
@@ -72,7 +69,13 @@ func validate(cfg *Config) error {
 	if err := validatePolicy(cfg); err != nil {
 		return err
 	}
-	if err := validateDatasources(cfg); err != nil {
+
+	allowed := buildAllowedSet(cfg.Policy.AllowedEnvironments)
+
+	if err := validateDatasources(cfg, allowed); err != nil {
+		return err
+	}
+	if err := validateConnectionEnvs(cfg, allowed); err != nil {
 		return err
 	}
 	if err := validateConnectionRefs(cfg); err != nil {
@@ -82,6 +85,20 @@ func validate(cfg *Config) error {
 		return err
 	}
 	return nil
+}
+
+// buildAllowedSet constructs the allowed-environments lookup from config,
+// falling back to the default set if the config field is empty.
+func buildAllowedSet(cfgEnvs []string) map[string]bool {
+	envs := cfgEnvs
+	if len(envs) == 0 {
+		envs = defaultAllowedEnvironments
+	}
+	set := make(map[string]bool, len(envs))
+	for _, e := range envs {
+		set[e] = true
+	}
+	return set
 }
 
 // validateTransport ensures the transport is "streamable_http".
@@ -104,31 +121,55 @@ func validatePolicy(cfg *Config) error {
 }
 
 // validateDatasources ensures all datasource environments are in the allowed set.
-func validateDatasources(cfg *Config) error {
+func validateDatasources(cfg *Config, allowed map[string]bool) error {
 	for _, ds := range cfg.Datasources.SQL {
-		if err := checkEnvironment(ds.Name, ds.Environment); err != nil {
+		if err := checkEnvironment(ds.Name, ds.Environment, allowed); err != nil {
 			return err
 		}
 	}
 	for _, ds := range cfg.Datasources.Redis {
-		if err := checkEnvironment(ds.Name, ds.Environment); err != nil {
+		if err := checkEnvironment(ds.Name, ds.Environment, allowed); err != nil {
 			return err
 		}
 	}
 	for _, ds := range cfg.Datasources.Mongo {
-		if err := checkEnvironment(ds.Name, ds.Environment); err != nil {
+		if err := checkEnvironment(ds.Name, ds.Environment, allowed); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// checkEnvironment verifies a datasource environment is in the allowed set.
-func checkEnvironment(name, env string) error {
-	if !allowedEnvironments[env] {
+// validateConnectionEnvs ensures all connection environments are in the allowed set.
+func validateConnectionEnvs(cfg *Config, allowed map[string]bool) error {
+	for _, c := range cfg.Connections.SQL {
+		if err := checkEnvironment(c.Name, c.Environment, allowed); err != nil {
+			return err
+		}
+	}
+	for _, c := range cfg.Connections.Redis {
+		if err := checkEnvironment(c.Name, c.Environment, allowed); err != nil {
+			return err
+		}
+	}
+	for _, c := range cfg.Connections.Mongo {
+		if err := checkEnvironment(c.Name, c.Environment, allowed); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkEnvironment verifies an entity's environment is in the allowed set.
+func checkEnvironment(name, env string, allowed map[string]bool) error {
+	if !allowed[env] {
+		keys := make([]string, 0, len(allowed))
+		for k := range allowed {
+			keys = append(keys, k)
+		}
 		return fmt.Errorf(
-			"datasource %q has disallowed environment %q; allowed: dev, support",
-			name, env,
+			"datasource %q has disallowed environment %q; allowed: %s",
+			name, env, strings.Join(keys, ", "),
 		)
 	}
 	return nil

@@ -12,7 +12,6 @@ policy:
   allowed_environments:
     - "dev"
     - "support"
-    - "prod"
   production_enabled: false
   confirm_all_writes: true
   reject_write_without_confirmation: true
