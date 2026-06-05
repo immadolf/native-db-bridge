@@ -267,3 +267,147 @@ func (s *Store) MarkConfirmationCancelled(id string) error {
 	}
 	return nil
 }
+
+// ---------------------------------------------------------------------------
+// Operation and AuditEvent types
+// ---------------------------------------------------------------------------
+
+// Operation represents a tracked operation (read, write, or metadata).
+type Operation struct {
+	ID                string
+	Kind              string
+	Datasource        string
+	Status            string
+	ConfirmationID    string
+	StartedAt         time.Time
+	FinishedAt        *time.Time
+	CancelRequestedAt *time.Time
+	ErrorCode         string
+	ErrorSummary      string
+}
+
+// AuditEvent represents a single audit log entry.
+type AuditEvent struct {
+	ID             string
+	EventType      string
+	Datasource     string
+	OperationID    string
+	ConfirmationID string
+	Summary        string
+	Status         string
+	ElapsedMs      int64
+	RowCount       int
+	ErrorCode      string
+	CreatedAt      time.Time
+}
+
+// InsertOperation inserts a new operation record.
+func (s *Store) InsertOperation(op Operation) error {
+	_, err := s.db.Exec(`
+		INSERT INTO operations
+			(id, kind, datasource, status, confirmation_id, started_at)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		op.ID, op.Kind, op.Datasource, op.Status, op.ConfirmationID, op.StartedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("audit: insert operation %q: %w", op.ID, err)
+	}
+	return nil
+}
+
+// InsertAuditEvent inserts a new audit event record.
+func (s *Store) InsertAuditEvent(evt AuditEvent) error {
+	_, err := s.db.Exec(`
+		INSERT INTO audit_events
+			(id, event_type, datasource, operation_id, confirmation_id,
+			 summary, status, elapsed_ms, row_count, error_code, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		evt.ID, evt.EventType, evt.Datasource, evt.OperationID, evt.ConfirmationID,
+		evt.Summary, evt.Status, evt.ElapsedMs, evt.RowCount, evt.ErrorCode, evt.CreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("audit: insert audit event %q: %w", evt.ID, err)
+	}
+	return nil
+}
+
+// ListOperations returns recent operations, optionally filtered by status.
+func (s *Store) ListOperations(status string, limit int) ([]Operation, error) {
+	query := `SELECT id, kind, datasource, status, COALESCE(confirmation_id, ''),
+	                 started_at, finished_at, cancel_requested_at,
+	                 COALESCE(error_code, ''), COALESCE(error_summary, '')
+	          FROM operations`
+	args := []interface{}{}
+
+	if status != "" {
+		query += " WHERE status=?"
+		args = append(args, status)
+	}
+	query += " ORDER BY started_at DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("audit: list operations: %w", err)
+	}
+	defer rows.Close()
+
+	var ops []Operation
+	for rows.Next() {
+		var op Operation
+		if err := rows.Scan(
+			&op.ID, &op.Kind, &op.Datasource, &op.Status, &op.ConfirmationID,
+			&op.StartedAt, &op.FinishedAt, &op.CancelRequestedAt,
+			&op.ErrorCode, &op.ErrorSummary,
+		); err != nil {
+			return nil, fmt.Errorf("audit: scan operation: %w", err)
+		}
+		ops = append(ops, op)
+	}
+	return ops, rows.Err()
+}
+
+// ListAuditEvents returns recent audit events, optionally filtered by
+// datasource, event type, and status.
+func (s *Store) ListAuditEvents(datasource, eventType, status string, limit int) ([]AuditEvent, error) {
+	query := `SELECT id, event_type, datasource, COALESCE(operation_id, ''),
+	                 COALESCE(confirmation_id, ''),
+	                 summary, status, elapsed_ms, row_count,
+	                 COALESCE(error_code, ''), created_at
+	          FROM audit_events WHERE 1=1`
+	args := []interface{}{}
+
+	if datasource != "" {
+		query += " AND datasource=?"
+		args = append(args, datasource)
+	}
+	if eventType != "" {
+		query += " AND event_type=?"
+		args = append(args, eventType)
+	}
+	if status != "" {
+		query += " AND status=?"
+		args = append(args, status)
+	}
+	query += " ORDER BY created_at DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("audit: list audit events: %w", err)
+	}
+	defer rows.Close()
+
+	var events []AuditEvent
+	for rows.Next() {
+		var evt AuditEvent
+		if err := rows.Scan(
+			&evt.ID, &evt.EventType, &evt.Datasource, &evt.OperationID, &evt.ConfirmationID,
+			&evt.Summary, &evt.Status, &evt.ElapsedMs, &evt.RowCount, &evt.ErrorCode, &evt.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("audit: scan audit event: %w", err)
+		}
+		events = append(events, evt)
+	}
+	return events, rows.Err()
+}
