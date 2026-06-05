@@ -1,5 +1,7 @@
 # native-db-bridge-mcp
 
+[English](README.en.md)
+
 本机常驻的 MCP 服务，替代 DataGrip MCP 作为开发/测试环境的数据库操作入口。
 
 ## 为什么
