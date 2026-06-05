@@ -1,15 +1,14 @@
 package server
 
 import (
+	"crypto/subtle"
 	"net/http"
 	"strings"
 )
 
 // Authorized checks whether the request carries a valid Bearer token
 // matching the expected value. The comparison is constant-time-safe
-// for production use via subtle.ConstantTimeCompare is not used here
-// because the token is expected to be high-entropy and non-guessable;
-// a simple string comparison is acceptable for this tool's threat model.
+// via crypto/subtle.ConstantTimeCompare to avoid timing side-channels.
 func Authorized(r *http.Request, token string) bool {
 	if token == "" {
 		return false
@@ -24,5 +23,6 @@ func Authorized(r *http.Request, token string) bool {
 		return false
 	}
 
-	return auth[len(prefix):] == token
+	actual := auth[len(prefix):]
+	return subtle.ConstantTimeCompare([]byte(actual), []byte(token)) == 1
 }

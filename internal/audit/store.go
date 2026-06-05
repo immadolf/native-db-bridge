@@ -268,6 +268,26 @@ func (s *Store) MarkConfirmationCancelled(id string) error {
 	return nil
 }
 
+// MarkExpiredConfirmations bulk-transitions all pending confirmations whose
+// expires_at is before now to "expired" status. It returns the number of
+// rows affected.
+func (s *Store) MarkExpiredConfirmations(now time.Time) (int64, error) {
+	result, err := s.db.Exec(`
+		UPDATE confirmations
+		SET status='expired', updated_at=?
+		WHERE status='pending' AND expires_at < ?`,
+		now, now,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("audit: mark expired confirmations: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("audit: mark expired confirmations rows affected: %w", err)
+	}
+	return rows, nil
+}
+
 // ---------------------------------------------------------------------------
 // Operation and AuditEvent types
 // ---------------------------------------------------------------------------
