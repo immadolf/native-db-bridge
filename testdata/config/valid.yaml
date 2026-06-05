@@ -1,0 +1,88 @@
+server:
+  listen: "127.0.0.1:9090"
+  mcp_path: "/mcp"
+  transport: "streamable_http"
+  client_token: "test-token-123"
+  request_timeout: "60s"
+  query_timeout: "30s"
+  max_result_rows: 1000
+  redis_scan_count_max: 100
+
+policy:
+  allowed_environments:
+    - "dev"
+    - "support"
+  production_enabled: false
+  confirm_all_writes: true
+  reject_write_without_confirmation: true
+  confirmation_ttl: "10m"
+  confirmation_expire_scan_interval: "30m"
+
+connection_lifecycle:
+  defaults:
+    lazy_connect: true
+    idle_ttl: "5m"
+    close_scan_interval: "1m"
+    connect_timeout: "10s"
+  sql:
+    idle_ttl: "10m"
+  redis:
+    idle_ttl: "3m"
+  mongo:
+    idle_ttl: "5m"
+
+storage:
+  sqlite_path: "/tmp/native-db-bridge-test.db"
+  log_path: "/tmp/native-db-bridge-test.log"
+
+connections:
+  sql:
+    - name: "dev-pg"
+      environment: "dev"
+      driver: "postgres"
+      dsn: "host=localhost port=5432 user=test dbname=testdb sslmode=disable"
+      pool:
+        max_open_conns: 10
+        max_idle_conns: 5
+        conn_max_lifetime: "30m"
+    - name: "support-mysql"
+      environment: "support"
+      driver: "mysql"
+      dsn: "test:test@tcp(localhost:3306)/supportdb"
+      pool:
+        max_open_conns: 5
+        max_idle_conns: 2
+        conn_max_lifetime: "15m"
+  redis:
+    - name: "dev-redis"
+      environment: "dev"
+      address: "localhost:6379"
+      username: ""
+      password: "fake-password"
+      tls: false
+  mongo:
+    - name: "dev-mongo"
+      environment: "dev"
+      uri: "mongodb://localhost:27017"
+
+datasources:
+  sql:
+    - name: "dev-postgres"
+      environment: "dev"
+      connection: "dev-pg"
+      default_database: "testdb"
+    - name: "support-mysql"
+      environment: "support"
+      connection: "support-mysql"
+      default_database: "supportdb"
+  redis:
+    - name: "dev-redis-cache"
+      environment: "dev"
+      connection: "dev-redis"
+      db: 0
+      service: "cache"
+  mongo:
+    - name: "support-mongo"
+      environment: "support"
+      connection: "dev-mongo"
+      default_database: "analytics"
