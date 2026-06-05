@@ -86,6 +86,20 @@ func (m *Manager[K]) Acquire(ctx context.Context, key K) (func(), error) {
 	return release, nil
 }
 
+// Get returns the managed resource for key if it exists. The resource
+// is NOT considered in-flight; the caller should use Acquire for
+// operations that need the resource to stay alive during use.
+// This method is intended for type-asserting the resource after Acquire.
+func (m *Manager[K]) Get(key K) (Resource, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.entries[key]
+	if !ok {
+		return nil, false
+	}
+	return e.resource, true
+}
+
 // CloseIdle closes and removes every resource whose in-flight count is zero
 // and whose last-used time is before now (i.e. has been idle for longer
 // than the configured TTL). Resources with active references are left alone.

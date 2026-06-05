@@ -22,16 +22,8 @@ type SQLMetaBackend interface {
 	backend.SQLBackend
 	SchemaList(ctx context.Context, datasource string) ([]string, error)
 	ObjectTypeList(ctx context.Context, datasource string) ([]string, error)
-	ObjectList(ctx context.Context, datasource, schema, objectType, namePattern string) ([]SQLObjectInfo, error)
-	DescribeObject(ctx context.Context, datasource, schema, objectName, objectType string) (SQLDescribeResult, error)
-}
-
-// SQLDescribeResult holds the full description of a SQL object.
-type SQLDescribeResult struct {
-	Object     SQLObjectInfo
-	Columns    []SQLColumnInfo
-	Indexes    []SQLIndexInfo
-	Definition string
+	ObjectList(ctx context.Context, datasource, schema, objectType, namePattern string) ([]backend.SQLObjectInfo, error)
+	DescribeObject(ctx context.Context, datasource, schema, objectName, objectType string) (backend.SQLDescribeResult, error)
 }
 
 // Deps holds all dependencies injected into Handlers.

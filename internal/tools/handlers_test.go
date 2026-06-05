@@ -28,8 +28,8 @@ type fakeSQLBackend struct {
 	previewResult    backend.SQLResult
 	schemas          []string
 	objectTypes      []string
-	objects          []SQLObjectInfo
-	describeResult   SQLDescribeResult
+	objects          []backend.SQLObjectInfo
+	describeResult   backend.SQLDescribeResult
 }
 
 func (f *fakeSQLBackend) Ping(_ context.Context, _ string) error { return nil }
@@ -61,11 +61,11 @@ func (f *fakeSQLBackend) ObjectTypeList(_ context.Context, _ string) ([]string, 
 	return f.objectTypes, nil
 }
 
-func (f *fakeSQLBackend) ObjectList(_ context.Context, _, _, _, _ string) ([]SQLObjectInfo, error) {
+func (f *fakeSQLBackend) ObjectList(_ context.Context, _, _, _, _ string) ([]backend.SQLObjectInfo, error) {
 	return f.objects, nil
 }
 
-func (f *fakeSQLBackend) DescribeObject(_ context.Context, _, _, _, _ string) (SQLDescribeResult, error) {
+func (f *fakeSQLBackend) DescribeObject(_ context.Context, _, _, _, _ string) (backend.SQLDescribeResult, error) {
 	return f.describeResult, nil
 }
 
@@ -197,13 +197,13 @@ func newTestHandlers(t *testing.T) *testHandlers {
 		},
 		schemas:     []string{"saas_dev"},
 		objectTypes: []string{"table", "view", "procedure", "function"},
-		objects: []SQLObjectInfo{
+		objects: []backend.SQLObjectInfo{
 			{Schema: "saas_dev", Name: "users", Type: "table"},
 		},
-		describeResult: SQLDescribeResult{
-			Object:  SQLObjectInfo{Schema: "saas_dev", Name: "users", Type: "table"},
-			Columns: []SQLColumnInfo{{Name: "id", Type: "BIGINT", Nullable: false}},
-			Indexes: []SQLIndexInfo{{Name: "PRIMARY", Columns: []string{"id"}, Unique: true}},
+		describeResult: backend.SQLDescribeResult{
+			Object:  backend.SQLObjectInfo{Schema: "saas_dev", Name: "users", Type: "table"},
+			Columns: []backend.SQLColumnInfo{{Name: "id", Type: "BIGINT", Nullable: false}},
+			Indexes: []backend.SQLIndexInfo{{Name: "PRIMARY", Columns: []string{"id"}, Unique: true}},
 		},
 	}
 

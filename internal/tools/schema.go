@@ -2,6 +2,8 @@
 // for the native-db-bridge MCP server.
 package tools
 
+import "native-db-bridge-mcp/internal/backend"
+
 // ToolNames returns the complete list of all 24 MCP tool names.
 func ToolNames() []string {
 	return []string{
@@ -263,40 +265,19 @@ type SQLObjectTypeListOutput struct {
 	ObjectTypes []string `json:"object_types"`
 }
 
-// SQLObjectInfo describes a single SQL object (table, view, etc.).
-type SQLObjectInfo struct {
-	Schema string `json:"schema"`
-	Name   string `json:"name"`
-	Type   string `json:"type"`
-}
-
 // SQLObjectListOutput is the output for the sql_object_list tool.
 type SQLObjectListOutput struct {
 	BaseOutput
-	Objects []SQLObjectInfo `json:"objects"`
-}
-
-// SQLColumnInfo describes a column including nullability.
-type SQLColumnInfo struct {
-	Name     string `json:"name"`
-	Type     string `json:"type"`
-	Nullable bool   `json:"nullable"`
-}
-
-// SQLIndexInfo describes an index on a SQL object.
-type SQLIndexInfo struct {
-	Name     string   `json:"name"`
-	Columns  []string `json:"columns"`
-	Unique   bool     `json:"unique"`
+	Objects []backend.SQLObjectInfo `json:"objects"`
 }
 
 // SQLObjectDescribeOutput is the output for the sql_object_describe tool.
 type SQLObjectDescribeOutput struct {
 	BaseOutput
-	Object     SQLObjectInfo   `json:"object"`
-	Columns    []SQLColumnInfo `json:"columns"`
-	Indexes    []SQLIndexInfo  `json:"indexes,omitempty"`
-	Definition string          `json:"definition,omitempty"`
+	Object     backend.SQLObjectInfo   `json:"object"`
+	Columns    []backend.SQLColumnInfo `json:"columns"`
+	Indexes    []backend.SQLIndexInfo  `json:"indexes,omitempty"`
+	Definition string                  `json:"definition,omitempty"`
 }
 
 // SQLTablePreviewOutput is the output for the sql_table_preview tool.
