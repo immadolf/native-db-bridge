@@ -1,5 +1,5 @@
 # --- 运行态文件（设计文档要求整体忽略） ---
-var/
+/var/
 
 # --- Go 构建产物 ---
 *.exe
@@ -13,6 +13,7 @@ var/
 # --- Go 测试与覆盖率 ---
 *.test
 *.out
+/coverage.out
 coverage.html
 coverage.txt
 
