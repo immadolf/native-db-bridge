@@ -118,9 +118,14 @@ func (b *SQLDriverBackend) Query(ctx context.Context, datasource string, sqlStr 
 		limit = maxRows
 	}
 
-	finalSQL := applyLimit(sqlStr, limit)
+	finalSQL, hasLimitParam := applyLimit(sqlStr, limit)
 
-	rows, err := db.QueryContext(ctx, finalSQL, limit)
+	var rows *sql.Rows
+	if hasLimitParam {
+		rows, err = db.QueryContext(ctx, finalSQL, limit)
+	} else {
+		rows, err = db.QueryContext(ctx, finalSQL)
+	}
 	if err != nil {
 		return SQLResult{}, fmt.Errorf("sql query %s: %w", datasource, err)
 	}
@@ -449,11 +454,11 @@ func buildDSN(baseDSN, database string) string {
 
 // applyLimit wraps a SQL query with a LIMIT clause by wrapping it as a
 // subquery with a parameter placeholder. If the original query already
-// contains a LIMIT clause, it is returned as-is.
-func applyLimit(sqlStr string, limit int) string {
+// contains a LIMIT clause, it is returned as-is with hasLimitParam=false.
+func applyLimit(sqlStr string, limit int) (string, bool) {
 	upper := strings.ToUpper(strings.TrimSpace(sqlStr))
 	if strings.Contains(upper, " LIMIT ") {
-		return sqlStr
+		return sqlStr, false
 	}
-	return fmt.Sprintf("SELECT * FROM (%s) AS ndb_limited LIMIT ?", sqlStr)
+	return fmt.Sprintf("SELECT * FROM (%s) AS ndb_limited LIMIT ?", sqlStr), true
 }

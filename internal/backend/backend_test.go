@@ -274,36 +274,43 @@ func TestBuildDSN(t *testing.T) {
 
 func TestApplyLimit(t *testing.T) {
 	tests := []struct {
-		name  string
-		sql   string
-		limit int
-		want  string
+		name           string
+		sql            string
+		limit          int
+		wantSQL        string
+		wantHasParam   bool
 	}{
 		{
-			name:  "no existing limit",
-			sql:   "SELECT * FROM users",
-			limit: 100,
-			want:  "SELECT * FROM (SELECT * FROM users) AS ndb_limited LIMIT ?",
+			name:         "no existing limit",
+			sql:          "SELECT * FROM users",
+			limit:        100,
+			wantSQL:      "SELECT * FROM (SELECT * FROM users) AS ndb_limited LIMIT ?",
+			wantHasParam: true,
 		},
 		{
-			name:  "already has limit",
-			sql:   "SELECT * FROM users LIMIT 50",
-			limit: 100,
-			want:  "SELECT * FROM users LIMIT 50",
+			name:         "already has limit",
+			sql:          "SELECT * FROM users LIMIT 50",
+			limit:        100,
+			wantSQL:      "SELECT * FROM users LIMIT 50",
+			wantHasParam: false,
 		},
 		{
-			name:  "lowercase limit",
-			sql:   "select * from users limit 10",
-			limit: 100,
-			want:  "select * from users limit 10",
+			name:         "lowercase limit",
+			sql:          "select * from users limit 10",
+			limit:        100,
+			wantSQL:      "select * from users limit 10",
+			wantHasParam: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := applyLimit(tt.sql, tt.limit)
-			if got != tt.want {
-				t.Fatalf("applyLimit(%q, %d) = %q, want %q", tt.sql, tt.limit, got, tt.want)
+			gotSQL, gotHasParam := applyLimit(tt.sql, tt.limit)
+			if gotSQL != tt.wantSQL {
+				t.Fatalf("applyLimit(%q, %d) sql = %q, want %q", tt.sql, tt.limit, gotSQL, tt.wantSQL)
+			}
+			if gotHasParam != tt.wantHasParam {
+				t.Fatalf("applyLimit(%q, %d) hasParam = %v, want %v", tt.sql, tt.limit, gotHasParam, tt.wantHasParam)
 			}
 		})
 	}
