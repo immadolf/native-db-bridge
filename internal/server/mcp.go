@@ -5,13 +5,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"reflect"
+	"strings"
 
 	"native-db-bridge-mcp/internal/tools"
 )
 
 // JSON-RPC 2.0 constants.
 const (
-	jsonrpcVersion = "2.0"
+	jsonrpcVersion     = "2.0"
+	mcpProtocolVersion = "2025-03-26"
 
 	// Standard JSON-RPC error codes.
 	errCodeParseError     = -32700
@@ -42,6 +45,25 @@ type JSONRPCError struct {
 	Code    int         `json:"code"`
 	Message string      `json:"message"`
 	Data    interface{} `json:"data,omitempty"`
+}
+
+// MCPTool describes one tool in the standard MCP tools/list response.
+type MCPTool struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description"`
+	InputSchema map[string]interface{} `json:"inputSchema"`
+}
+
+// mcpCallToolParams is the standard params object for tools/call.
+type mcpCallToolParams struct {
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments,omitempty"`
+}
+
+// mcpTextContent is the standard text content item returned by tools/call.
+type mcpTextContent struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
 }
 
 // toolHandler is a function that dispatches raw JSON params to a typed handler.
@@ -226,6 +248,148 @@ func buildDispatcher(h *tools.Handlers) map[string]toolHandler {
 	}
 }
 
+// buildMCPTools creates the standard MCP tool metadata for tools/list.
+func buildMCPTools() []MCPTool {
+	typesByName := map[string]reflect.Type{
+		"datasource_list":           inputTypeOf[tools.DatasourceListInput](),
+		"datasource_healthcheck":    inputTypeOf[tools.DatasourceHealthcheckInput](),
+		"sql_schema_list":           inputTypeOf[tools.SQLSchemaListInput](),
+		"sql_object_type_list":      inputTypeOf[tools.SQLObjectTypeListInput](),
+		"sql_object_list":           inputTypeOf[tools.SQLObjectListInput](),
+		"sql_object_describe":       inputTypeOf[tools.SQLObjectDescribeInput](),
+		"sql_table_preview":         inputTypeOf[tools.SQLTablePreviewInput](),
+		"redis_key_scan":            inputTypeOf[tools.RedisKeyScanInput](),
+		"redis_key_describe":        inputTypeOf[tools.RedisKeyDescribeInput](),
+		"mongo_database_list":       inputTypeOf[tools.MongoDatabaseListInput](),
+		"mongo_collection_list":     inputTypeOf[tools.MongoCollectionListInput](),
+		"mongo_collection_describe": inputTypeOf[tools.MongoCollectionDescribeInput](),
+		"sql_query":                 inputTypeOf[tools.SQLQueryInput](),
+		"sql_prepare_change":        inputTypeOf[tools.SQLPrepareChangeInput](),
+		"redis_command":             inputTypeOf[tools.RedisCommandInput](),
+		"redis_prepare_change":      inputTypeOf[tools.RedisPrepareChangeInput](),
+		"mongo_find":                inputTypeOf[tools.MongoFindInput](),
+		"mongo_prepare_change":      inputTypeOf[tools.MongoPrepareChangeInput](),
+		"execute_confirmation":      inputTypeOf[tools.ExecuteConfirmationInput](),
+		"operation_list":            inputTypeOf[tools.OperationListInput](),
+		"cancel_operation":          inputTypeOf[tools.CancelOperationInput](),
+		"audit_recent":              inputTypeOf[tools.AuditRecentInput](),
+		"confirmation_get":          inputTypeOf[tools.ConfirmationGetInput](),
+		"cancel_confirmation":       inputTypeOf[tools.CancelConfirmationInput](),
+	}
+
+	descriptions := map[string]string{
+		"datasource_list":           "List configured SQL, Redis, and MongoDB datasources.",
+		"datasource_healthcheck":    "Check a datasource configuration or live connectivity.",
+		"sql_schema_list":           "List schemas or databases for a SQL datasource.",
+		"sql_object_type_list":      "List SQL object types supported by the datasource.",
+		"sql_object_list":           "List SQL tables, views, or other schema objects.",
+		"sql_object_describe":       "Describe a SQL object including columns, indexes, and definition.",
+		"sql_table_preview":         "Preview rows from a SQL table with a bounded limit.",
+		"redis_key_scan":            "Scan Redis keys with cursor pagination.",
+		"redis_key_describe":        "Describe one Redis key including type, TTL, length, and existence.",
+		"mongo_database_list":       "List MongoDB databases for a datasource.",
+		"mongo_collection_list":     "List MongoDB collections for a datasource.",
+		"mongo_collection_describe": "Describe a MongoDB collection including indexes and sample schema.",
+		"sql_query":                 "Run a read-only SQL query with limit and timeout controls.",
+		"sql_prepare_change":        "Prepare a SQL write operation and create a confirmation record.",
+		"redis_command":             "Run an allowed read-only Redis command.",
+		"redis_prepare_change":      "Prepare a Redis write command and create a confirmation record.",
+		"mongo_find":                "Run an allowed read-only MongoDB find, count, distinct, or aggregate operation.",
+		"mongo_prepare_change":      "Prepare a MongoDB write operation and create a confirmation record.",
+		"execute_confirmation":      "Execute a previously prepared write confirmation.",
+		"operation_list":            "List recent or running operations.",
+		"cancel_operation":          "Request cancellation of a running operation.",
+		"audit_recent":              "List recent audit events.",
+		"confirmation_get":          "Get the current state of a write confirmation.",
+		"cancel_confirmation":       "Cancel a pending write confirmation.",
+	}
+
+	result := make([]MCPTool, 0, len(typesByName))
+	for _, name := range tools.ToolNames() {
+		result = append(result, MCPTool{
+			Name:        name,
+			Description: descriptions[name],
+			InputSchema: inputSchemaFor(typesByName[name]),
+		})
+	}
+	return result
+}
+
+func inputTypeOf[T any]() reflect.Type {
+	var zero T
+	return reflect.TypeOf(zero)
+}
+
+func inputSchemaFor(t reflect.Type) map[string]interface{} {
+	schema := map[string]interface{}{
+		"type":                 "object",
+		"properties":           map[string]interface{}{},
+		"additionalProperties": false,
+	}
+	if t.Kind() != reflect.Struct {
+		return schema
+	}
+
+	properties := schema["properties"].(map[string]interface{})
+	required := make([]string, 0)
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		name, optional := jsonFieldName(field)
+		if name == "" || name == "-" {
+			continue
+		}
+		properties[name] = jsonSchemaForType(field.Type)
+		if !optional {
+			required = append(required, name)
+		}
+	}
+	if len(required) > 0 {
+		schema["required"] = required
+	}
+	return schema
+}
+
+func jsonFieldName(field reflect.StructField) (string, bool) {
+	tag := field.Tag.Get("json")
+	if tag == "" {
+		return field.Name, false
+	}
+	parts := strings.Split(tag, ",")
+	optional := false
+	for _, part := range parts[1:] {
+		if part == "omitempty" {
+			optional = true
+			break
+		}
+	}
+	return parts[0], optional
+}
+
+func jsonSchemaForType(t reflect.Type) map[string]interface{} {
+	switch t.Kind() {
+	case reflect.String:
+		return map[string]interface{}{"type": "string"}
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return map[string]interface{}{"type": "integer"}
+	case reflect.Bool:
+		return map[string]interface{}{"type": "boolean"}
+	case reflect.Slice, reflect.Array:
+		return map[string]interface{}{
+			"type":  "array",
+			"items": jsonSchemaForType(t.Elem()),
+		}
+	case reflect.Map:
+		return map[string]interface{}{
+			"type":                 "object",
+			"additionalProperties": true,
+		}
+	case reflect.Interface:
+		return map[string]interface{}{}
+	default:
+		return map[string]interface{}{"type": "object"}
+	}
+}
+
 // handleMCP handles a single JSON-RPC 2.0 request against the dispatcher.
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -244,20 +408,81 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	handler, ok := s.dispatcher[req.Method]
-	if !ok {
-		writeJSONRPCError(w, req.ID, errCodeMethodNotFound,
-			fmt.Sprintf("unknown method %q", req.Method), nil)
+	if len(req.ID) == 0 && strings.HasPrefix(req.Method, "notifications/") {
+		w.WriteHeader(http.StatusAccepted)
 		return
 	}
 
-	result, err := handler(r.Context(), req.Params)
+	result, err := s.dispatchJSONRPC(r.Context(), req)
 	if err != nil {
-		writeJSONRPCError(w, req.ID, errCodeInvalidParams, err.Error(), nil)
+		code := errCodeInvalidParams
+		if strings.HasPrefix(err.Error(), "unknown method") || strings.HasPrefix(err.Error(), "unknown tool") {
+			code = errCodeMethodNotFound
+		}
+		writeJSONRPCError(w, req.ID, code, err.Error(), nil)
 		return
 	}
 
 	writeJSONRPCResult(w, req.ID, result)
+}
+
+func (s *Server) dispatchJSONRPC(ctx context.Context, req JSONRPCRequest) (interface{}, error) {
+	switch req.Method {
+	case "initialize":
+		return map[string]interface{}{
+			"protocolVersion": mcpProtocolVersion,
+			"capabilities": map[string]interface{}{
+				"tools": map[string]interface{}{},
+			},
+			"serverInfo": map[string]interface{}{
+				"name":    "native-db-bridge",
+				"version": "0.1.0",
+			},
+		}, nil
+	case "notifications/initialized":
+		return nil, nil
+	case "tools/list":
+		return map[string]interface{}{
+			"tools": buildMCPTools(),
+		}, nil
+	case "tools/call":
+		return s.dispatchMCPToolCall(ctx, req.Params)
+	default:
+		handler, ok := s.dispatcher[req.Method]
+		if !ok {
+			return nil, fmt.Errorf("unknown method %q", req.Method)
+		}
+		return handler(ctx, req.Params)
+	}
+}
+
+func (s *Server) dispatchMCPToolCall(ctx context.Context, params json.RawMessage) (interface{}, error) {
+	var call mcpCallToolParams
+	if err := json.Unmarshal(params, &call); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	handler, ok := s.dispatcher[call.Name]
+	if !ok {
+		return nil, fmt.Errorf("unknown tool %q", call.Name)
+	}
+	args := call.Arguments
+	if len(args) == 0 {
+		args = json.RawMessage("{}")
+	}
+	result, err := handler(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	resultJSON, err := json.Marshal(result)
+	if err != nil {
+		return nil, fmt.Errorf("encode tool result: %w", err)
+	}
+	return map[string]interface{}{
+		"content": []mcpTextContent{
+			{Type: "text", Text: string(resultJSON)},
+		},
+		"isError": false,
+	}, nil
 }
 
 // writeJSONRPCResult writes a successful JSON-RPC 2.0 response.

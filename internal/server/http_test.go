@@ -139,6 +139,117 @@ func TestMCPDatasourceList(t *testing.T) {
 	}
 }
 
+func TestMCPInitialize(t *testing.T) {
+	srv := newTestServer(t)
+
+	body := jsonrpcRequest("initialize", map[string]interface{}{
+		"protocolVersion": "2025-03-26",
+		"capabilities":    map[string]interface{}{},
+		"clientInfo": map[string]string{
+			"name":    "test-client",
+			"version": "0.1.0",
+		},
+	})
+	resp := doAuthenticatedMCP(t, srv, body)
+
+	if resp.Error != nil {
+		t.Fatalf("expected success, got error: %s", resp.Error.Message)
+	}
+
+	result := responseResultMap(t, resp)
+	if result["protocolVersion"] != mcpProtocolVersion {
+		t.Fatalf("unexpected protocolVersion: %v", result["protocolVersion"])
+	}
+	if _, ok := result["capabilities"].(map[string]interface{})["tools"]; !ok {
+		t.Fatalf("expected tools capability in initialize result")
+	}
+}
+
+func TestMCPInitializedNotification(t *testing.T) {
+	srv := newTestServer(t)
+
+	raw := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  "notifications/initialized",
+	}
+	body, _ := json.Marshal(raw)
+	req := httptest.NewRequest("POST", "/mcp", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 for initialized notification, got %d", rec.Code)
+	}
+	if rec.Body.Len() != 0 {
+		t.Fatalf("expected empty notification response, got %q", rec.Body.String())
+	}
+}
+
+func TestMCPToolsList(t *testing.T) {
+	srv := newTestServer(t)
+
+	body := jsonrpcRequest("tools/list", map[string]interface{}{})
+	resp := doAuthenticatedMCP(t, srv, body)
+
+	if resp.Error != nil {
+		t.Fatalf("expected success, got error: %s", resp.Error.Message)
+	}
+
+	result := responseResultMap(t, resp)
+	list, ok := result["tools"].([]interface{})
+	if !ok {
+		t.Fatalf("expected tools array, got %#v", result["tools"])
+	}
+	if len(list) != len(tools.ToolNames()) {
+		t.Fatalf("expected %d tools, got %d", len(tools.ToolNames()), len(list))
+	}
+	first, ok := list[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected first tool object, got %#v", list[0])
+	}
+	if first["name"] != "datasource_list" {
+		t.Fatalf("expected first tool datasource_list, got %v", first["name"])
+	}
+	if _, ok := first["inputSchema"].(map[string]interface{}); !ok {
+		t.Fatalf("expected inputSchema object")
+	}
+}
+
+func TestMCPToolsCall(t *testing.T) {
+	srv := newTestServer(t)
+
+	body := jsonrpcRequest("tools/call", map[string]interface{}{
+		"name":      "datasource_list",
+		"arguments": map[string]interface{}{},
+	})
+	resp := doAuthenticatedMCP(t, srv, body)
+
+	if resp.Error != nil {
+		t.Fatalf("expected success, got error: %s", resp.Error.Message)
+	}
+
+	result := responseResultMap(t, resp)
+	content, ok := result["content"].([]interface{})
+	if !ok || len(content) != 1 {
+		t.Fatalf("expected one content item, got %#v", result["content"])
+	}
+	item, ok := content[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected content object, got %#v", content[0])
+	}
+	if item["type"] != "text" {
+		t.Fatalf("expected text content, got %v", item["type"])
+	}
+	var toolResult map[string]interface{}
+	if err := json.Unmarshal([]byte(item["text"].(string)), &toolResult); err != nil {
+		t.Fatalf("failed to decode tool text: %v", err)
+	}
+	if toolResult["ok"] != true {
+		t.Fatalf("expected ok=true tool result, got %#v", toolResult)
+	}
+}
+
 func TestMCPUnknownMethod(t *testing.T) {
 	srv := newTestServer(t)
 
@@ -313,4 +424,17 @@ func decodeJSONRPCResponse(t *testing.T, data []byte) JSONRPCResponse {
 		t.Fatalf("failed to decode JSON-RPC response: %v\nraw: %s", err, string(data))
 	}
 	return resp
+}
+
+func responseResultMap(t *testing.T, resp JSONRPCResponse) map[string]interface{} {
+	t.Helper()
+	b, err := json.Marshal(resp.Result)
+	if err != nil {
+		t.Fatalf("failed to marshal result: %v", err)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(b, &result); err != nil {
+		t.Fatalf("failed to decode result map: %v", err)
+	}
+	return result
 }
