@@ -61,6 +61,22 @@ func TestRejectGroupReadableConfigPermissions(t *testing.T) {
 	}
 }
 
+func TestRejectOwnerExecutableConfigPermissions(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data, err := os.ReadFile(filepath.Join("..", "..", "testdata", "config", "valid.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0100); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Load(path)
+	if err == nil {
+		t.Fatalf("Load() expected owner-executable permission error")
+	}
+}
+
 func TestRejectMultiStatementsInDSN(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")

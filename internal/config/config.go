@@ -51,7 +51,7 @@ func checkFilePermissions(path string) error {
 	}
 
 	perm := info.Mode().Perm()
-	if perm > maxConfigPerm {
+	if perm&0077 != 0 || perm&0111 != 0 || perm&maxConfigPerm != perm {
 		return fmt.Errorf(
 			"config file %q has too-open permissions %04o; must be %04o or more restrictive",
 			path, perm, maxConfigPerm,

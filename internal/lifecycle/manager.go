@@ -100,6 +100,14 @@ func (m *Manager[K]) Get(key K) (Resource, bool) {
 	return e.resource, true
 }
 
+// Len returns the number of resources currently tracked by the manager
+// (i.e., resources that have been lazily created and not yet closed).
+func (m *Manager[K]) Len() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.entries)
+}
+
 // CloseIdle closes and removes every resource whose in-flight count is zero
 // and whose last-used time is before now (i.e. has been idle for longer
 // than the configured TTL). Resources with active references are left alone.

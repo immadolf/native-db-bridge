@@ -85,6 +85,12 @@ func (b *SQLDriverBackend) Close() error {
 	return b.manager.Close()
 }
 
+// ActiveConnections returns the number of lazily-created connections
+// currently tracked by the lifecycle manager.
+func (b *SQLDriverBackend) ActiveConnections() int {
+	return b.manager.Len()
+}
+
 // Ping verifies connectivity to the given datasource.
 func (b *SQLDriverBackend) Ping(ctx context.Context, datasource string) error {
 	release, err := b.manager.Acquire(ctx, datasource)

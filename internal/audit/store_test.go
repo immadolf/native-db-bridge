@@ -173,3 +173,83 @@ func TestExecuteConfirmationCanWinOnlyOnce(t *testing.T) {
 		t.Fatalf("success=%d, want 1", success)
 	}
 }
+
+func TestExecutingConfirmationCannotExpireOrCancel(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	conf := Confirmation{
+		ID:          "conf_executing",
+		Kind:        "sql_dml",
+		Datasource:  "saas_support",
+		PayloadJSON: `{"sql":"UPDATE t SET a=1 WHERE id=1"}`,
+		PayloadHash: "hash",
+		Summary:     "UPDATE t ...",
+		RiskLevel:   "medium",
+		ImpactJSON:  `{"mode":"estimated","rows":1}`,
+		Status:      "pending",
+		ExpiresAt:   time.Now().Add(time.Minute),
+	}
+	if err := store.CreateConfirmation(conf); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkConfirmationExecuting(conf.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkConfirmationExpired(conf.ID); err == nil {
+		t.Fatal("executing confirmation must not expire")
+	}
+	if err := store.MarkConfirmationCancelled(conf.ID); err == nil {
+		t.Fatal("executing confirmation must not cancel")
+	}
+	got, err := store.GetConfirmation(conf.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "executing" {
+		t.Fatalf("status=%q, want executing", got.Status)
+	}
+}
+
+func TestOperationStatusTransitionsPersist(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	op := Operation{
+		ID:         "op_running",
+		Kind:       "sql_query",
+		Datasource: "saas_support",
+		Status:     "running",
+		StartedAt:  time.Now(),
+	}
+	if err := store.InsertOperation(op); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkOperationCancelRequested(op.ID); err != nil {
+		t.Fatal(err)
+	}
+	cancelled, err := store.ListOperations("cancel_requested", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cancelled) != 1 || cancelled[0].CancelRequestedAt == nil {
+		t.Fatalf("cancel_requested operation not persisted: %+v", cancelled)
+	}
+	if err := store.MarkOperationFinished(op.ID, "DRIVER_ERROR", "cancelled"); err != nil {
+		t.Fatal(err)
+	}
+	finished, err := store.ListOperations("finished", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(finished) != 1 || finished[0].FinishedAt == nil {
+		t.Fatalf("finished operation not persisted: %+v", finished)
+	}
+	if finished[0].ErrorCode != "DRIVER_ERROR" || finished[0].ErrorSummary != "cancelled" {
+		t.Fatalf("operation error fields not persisted: %+v", finished[0])
+	}
+}

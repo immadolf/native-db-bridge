@@ -82,6 +82,12 @@ func (b *RedisDriverBackend) Close() error {
 	return b.manager.Close()
 }
 
+// ActiveConnections returns the number of lazily-created connections
+// currently tracked by the lifecycle manager.
+func (b *RedisDriverBackend) ActiveConnections() int {
+	return b.manager.Len()
+}
+
 // Ping verifies connectivity to the given datasource.
 func (b *RedisDriverBackend) Ping(ctx context.Context, datasource string) error {
 	release, err := b.manager.Acquire(ctx, datasource)

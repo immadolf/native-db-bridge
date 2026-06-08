@@ -462,6 +462,15 @@ func TestCancelOperationCallsTracker(t *testing.T) {
 
 	// Register a dummy operation
 	cancelled := false
+	if err := h.store.InsertOperation(audit.Operation{
+		ID:         "op_test_cancel",
+		Kind:       "sql_query",
+		Datasource: "saas_support",
+		Status:     "running",
+		StartedAt:  time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	h.deps.Ops.Register("op_test_cancel", func() { cancelled = true })
 
 	output := h.CancelOperation(ctx, CancelOperationInput{
@@ -475,6 +484,22 @@ func TestCancelOperationCallsTracker(t *testing.T) {
 	}
 	if !cancelled {
 		t.Fatal("expected cancel function to be called")
+	}
+	ops, err := h.store.ListOperations("cancel_requested", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, op := range ops {
+		if op.ID == "op_test_cancel" {
+			found = true
+			if op.CancelRequestedAt == nil {
+				t.Fatal("expected cancel_requested_at")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected operation status cancel_requested")
 	}
 }
 

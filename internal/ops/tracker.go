@@ -29,16 +29,30 @@ func (t *Tracker) Register(operationID string, cancel context.CancelFunc) {
 // Returns true if the operation was found and cancelled, false if it was
 // already completed or unknown.
 func (t *Tracker) Cancel(operationID string) bool {
+	ok, _ := t.CancelAfter(operationID, nil)
+	return ok
+}
+
+// CancelAfter runs before while the operation is still registered, then invokes
+// and removes the cancel function. The callback is intended for persisting
+// cancel_requested before context cancellation can make the operation finish.
+func (t *Tracker) CancelAfter(operationID string, before func() error) (bool, error) {
 	t.mu.Lock()
 	cancel, ok := t.cancels[operationID]
-	if ok {
-		delete(t.cancels, operationID)
+	if !ok {
+		t.mu.Unlock()
+		return false, nil
 	}
+	if before != nil {
+		if err := before(); err != nil {
+			t.mu.Unlock()
+			return true, err
+		}
+	}
+	delete(t.cancels, operationID)
 	t.mu.Unlock()
-	if ok {
-		cancel()
-	}
-	return ok
+	cancel()
+	return true, nil
 }
 
 // Finish removes the operation from the tracker without calling its cancel

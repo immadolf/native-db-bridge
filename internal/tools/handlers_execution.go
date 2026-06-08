@@ -36,11 +36,11 @@ func (h *Handlers) SQLQuery(ctx context.Context, input SQLQueryInput) SQLQueryOu
 	}
 
 	ctx, opID := h.withOperation(ctx, "sql_query", input.Datasource, "")
-	defer h.deps.Ops.Finish(opID)
 
 	result, err := h.deps.SQL.Query(ctx, input.Datasource, input.SQL, limit)
 	if err != nil {
 		h.recordAuditEvent("sql_query", input.Datasource, opID, "", input.SQL, "error", 0, 0, err)
+		h.finishOperation(opID, err)
 		return SQLQueryOutput{BaseOutput: makeError(nbderrors.CodeDriverError, err.Error()).withOpID(opID)}
 	}
 
@@ -51,6 +51,7 @@ func (h *Handlers) SQLQuery(ctx context.Context, input SQLQueryInput) SQLQueryOu
 
 	h.recordAuditEvent("sql_query", input.Datasource, opID, "", input.SQL, "success",
 		result.Elapsed.Milliseconds(), result.RowCount, nil)
+	h.finishOperation(opID, nil)
 
 	return SQLQueryOutput{
 		BaseOutput: BaseOutput{OK: true, OperationID: opID},
@@ -70,6 +71,10 @@ func (h *Handlers) SQLPrepareChange(ctx context.Context, input SQLPrepareChangeI
 				"sql_prepare_change only accepts write statements (INSERT, UPDATE, DELETE, DDL)"),
 		}
 	}
+
+	ctx, opID := h.withOperation(ctx, "sql_prepare_change", input.Datasource, "")
+	var opErr error
+	defer func() { h.finishOperation(opID, opErr) }()
 
 	confirmationKind := "sql_dml"
 	if kind == "ddl" {
@@ -108,12 +113,13 @@ func (h *Handlers) SQLPrepareChange(ctx context.Context, input SQLPrepareChangeI
 	}
 
 	if err := h.deps.Audit.CreateConfirmation(conf); err != nil {
+		opErr = err
 		return SQLPrepareChangeOutput{
 			BaseOutput: makeError(nbderrors.CodeInternalError, fmt.Sprintf("failed to create confirmation: %v", err)),
 		}
 	}
 
-	h.recordAuditEvent("sql_prepare_change", input.Datasource, "", confID, input.SQL, "pending", 0, 0, nil)
+	h.recordAuditEvent("sql_prepare_change", input.Datasource, opID, confID, input.SQL, "pending", 0, 0, nil)
 
 	return SQLPrepareChangeOutput{
 		BaseOutput:     BaseOutput{OK: true},
@@ -144,18 +150,19 @@ func (h *Handlers) RedisCommand(ctx context.Context, input RedisCommandInput) Re
 	}
 
 	ctx, opID := h.withOperation(ctx, "redis_command", input.Datasource, "")
-	defer h.deps.Ops.Finish(opID)
 
 	result, err := h.deps.Redis.Command(ctx, input.Datasource, input.Command, input.Args)
 	if err != nil {
 		h.recordAuditEvent("redis_command", input.Datasource, opID, "",
 			fmt.Sprintf("%s %v", input.Command, input.Args), "error", 0, 0, err)
+		h.finishOperation(opID, err)
 		return RedisCommandOutput{BaseOutput: makeError(nbderrors.CodeDriverError, err.Error()).withOpID(opID)}
 	}
 
 	h.recordAuditEvent("redis_command", input.Datasource, opID, "",
 		fmt.Sprintf("%s %v", input.Command, input.Args), "success",
 		result.Elapsed.Milliseconds(), 0, nil)
+	h.finishOperation(opID, nil)
 
 	return RedisCommandOutput{
 		BaseOutput: BaseOutput{OK: true, OperationID: opID},
@@ -165,7 +172,7 @@ func (h *Handlers) RedisCommand(ctx context.Context, input RedisCommandInput) Re
 }
 
 // RedisPrepareChange creates a confirmation for a Redis write command.
-func (h *Handlers) RedisPrepareChange(_ context.Context, input RedisPrepareChangeInput) RedisPrepareChangeOutput {
+func (h *Handlers) RedisPrepareChange(ctx context.Context, input RedisPrepareChangeInput) RedisPrepareChangeOutput {
 	if policy.IsRedisAlwaysRejected(input.Command) {
 		return RedisPrepareChangeOutput{
 			BaseOutput: makeError(nbderrors.CodePolicyRedisSelectRejected,
@@ -179,6 +186,10 @@ func (h *Handlers) RedisPrepareChange(_ context.Context, input RedisPrepareChang
 				fmt.Sprintf("command %q is not a recognized write command", input.Command)),
 		}
 	}
+
+	ctx, opID := h.withOperation(ctx, "redis_prepare_change", input.Datasource, "")
+	var opErr error
+	defer func() { h.finishOperation(opID, opErr) }()
 
 	confID := "conf_" + uuid.New().String()
 	riskLevel := "medium"
@@ -216,12 +227,13 @@ func (h *Handlers) RedisPrepareChange(_ context.Context, input RedisPrepareChang
 	}
 
 	if err := h.deps.Audit.CreateConfirmation(conf); err != nil {
+		opErr = err
 		return RedisPrepareChangeOutput{
 			BaseOutput: makeError(nbderrors.CodeInternalError, fmt.Sprintf("failed to create confirmation: %v", err)),
 		}
 	}
 
-	h.recordAuditEvent("redis_prepare_change", input.Datasource, "", confID, summary, "pending", 0, 0, nil)
+	h.recordAuditEvent("redis_prepare_change", input.Datasource, opID, confID, summary, "pending", 0, 0, nil)
 
 	return RedisPrepareChangeOutput{
 		BaseOutput:     BaseOutput{OK: true},
@@ -258,7 +270,6 @@ func (h *Handlers) MongoFind(ctx context.Context, input MongoFindInput) MongoFin
 	}
 
 	ctx, opID := h.withOperation(ctx, "mongo_find", input.Datasource, "")
-	defer h.deps.Ops.Finish(opID)
 
 	timeout := h.parseTimeout(input.Timeout)
 	req := backend.MongoFindRequest{
@@ -277,12 +288,14 @@ func (h *Handlers) MongoFind(ctx context.Context, input MongoFindInput) MongoFin
 	if err != nil {
 		h.recordAuditEvent("mongo_find", input.Datasource, opID, "",
 			fmt.Sprintf("%s.%s", input.Datasource, input.Collection), "error", 0, 0, err)
+		h.finishOperation(opID, err)
 		return MongoFindOutput{BaseOutput: makeError(nbderrors.CodeDriverError, err.Error()).withOpID(opID)}
 	}
 
 	h.recordAuditEvent("mongo_find", input.Datasource, opID, "",
 		fmt.Sprintf("%s.%s", input.Datasource, input.Collection), "success",
 		result.Elapsed.Milliseconds(), result.Count, nil)
+	h.finishOperation(opID, nil)
 
 	return MongoFindOutput{
 		BaseOutput: BaseOutput{OK: true, OperationID: opID},
@@ -293,7 +306,7 @@ func (h *Handlers) MongoFind(ctx context.Context, input MongoFindInput) MongoFin
 }
 
 // MongoPrepareChange creates a confirmation for a MongoDB write operation.
-func (h *Handlers) MongoPrepareChange(_ context.Context, input MongoPrepareChangeInput) MongoPrepareChangeOutput {
+func (h *Handlers) MongoPrepareChange(ctx context.Context, input MongoPrepareChangeInput) MongoPrepareChangeOutput {
 	hasFilter := len(input.Filter) > 0
 	hasDocument := len(input.Document) > 0
 	hasDocuments := len(input.Documents) > 0
@@ -304,6 +317,10 @@ func (h *Handlers) MongoPrepareChange(_ context.Context, input MongoPrepareChang
 				fmt.Sprintf("invalid parameter combination for mongo operation %q", input.Operation)),
 		}
 	}
+
+	ctx, opID := h.withOperation(ctx, "mongo_prepare_change", input.Datasource, "")
+	var opErr error
+	defer func() { h.finishOperation(opID, opErr) }()
 
 	confID := "conf_" + uuid.New().String()
 	riskLevel := "medium"
@@ -341,12 +358,13 @@ func (h *Handlers) MongoPrepareChange(_ context.Context, input MongoPrepareChang
 	}
 
 	if err := h.deps.Audit.CreateConfirmation(conf); err != nil {
+		opErr = err
 		return MongoPrepareChangeOutput{
 			BaseOutput: makeError(nbderrors.CodeInternalError, fmt.Sprintf("failed to create confirmation: %v", err)),
 		}
 	}
 
-	h.recordAuditEvent("mongo_prepare_change", input.Datasource, "", confID, summary, "pending", 0, 0, nil)
+	h.recordAuditEvent("mongo_prepare_change", input.Datasource, opID, confID, summary, "pending", 0, 0, nil)
 
 	return MongoPrepareChangeOutput{
 		BaseOutput:     BaseOutput{OK: true},
@@ -370,12 +388,26 @@ func (h *Handlers) ExecuteConfirmation(ctx context.Context, input ExecuteConfirm
 		}
 	}
 
+	ctx, opID := h.withOperation(ctx, "execute_"+conf.Kind, conf.Datasource, input.ConfirmationID)
+
 	// Check expiry
 	if time.Now().After(conf.ExpiresAt) {
-		_ = h.deps.Audit.MarkConfirmationExpired(input.ConfirmationID)
+		if err := h.deps.Audit.MarkConfirmationExpired(input.ConfirmationID); err != nil {
+			h.finishOperation(opID, err)
+			return ExecuteConfirmationOutput{
+				BaseOutput: makeError(nbderrors.CodeConfirmationInvalidState,
+					fmt.Sprintf("confirmation %q is not in pending state", input.ConfirmationID)).withOpID(opID),
+				ConfirmationID: input.ConfirmationID,
+				Status:         conf.Status,
+			}
+		}
+		expiredErr := fmt.Errorf("confirmation %q has expired", input.ConfirmationID)
+		h.recordAuditEvent("execute_confirmation", conf.Datasource, opID, input.ConfirmationID,
+			conf.Summary, "expired", 0, 0, nil)
+		h.finishOperation(opID, expiredErr)
 		return ExecuteConfirmationOutput{
 			BaseOutput: makeError(nbderrors.CodeConfirmationExpired,
-				fmt.Sprintf("confirmation %q has expired", input.ConfirmationID)),
+				fmt.Sprintf("confirmation %q has expired", input.ConfirmationID)).withOpID(opID),
 			ConfirmationID: input.ConfirmationID,
 			Status:         "expired",
 		}
@@ -383,14 +415,13 @@ func (h *Handlers) ExecuteConfirmation(ctx context.Context, input ExecuteConfirm
 
 	// Mark executing (atomic CAS: pending -> executing)
 	if err := h.deps.Audit.MarkConfirmationExecuting(input.ConfirmationID); err != nil {
+		h.finishOperation(opID, err)
 		return ExecuteConfirmationOutput{
 			BaseOutput: makeError(nbderrors.CodeConfirmationInvalidState,
-				fmt.Sprintf("confirmation %q is not in pending state", input.ConfirmationID)),
+				fmt.Sprintf("confirmation %q is not in pending state", input.ConfirmationID)).withOpID(opID),
 			ConfirmationID: input.ConfirmationID,
 		}
 	}
-
-	ctx, opID := h.withOperation(ctx, "execute_"+conf.Kind, conf.Datasource, input.ConfirmationID)
 
 	// Execute the frozen payload
 	execResult, execErr := h.executePayload(ctx, conf)
@@ -399,7 +430,7 @@ func (h *Handlers) ExecuteConfirmation(ctx context.Context, input ExecuteConfirm
 		_ = h.deps.Audit.MarkConfirmationFailed(input.ConfirmationID, execErr.Error())
 		h.recordAuditEvent("execute_confirmation", conf.Datasource, opID, input.ConfirmationID,
 			conf.Summary, "error", 0, 0, execErr)
-		h.deps.Ops.Finish(opID)
+		h.finishOperation(opID, execErr)
 		return ExecuteConfirmationOutput{
 			BaseOutput:     makeError(nbderrors.CodeDriverError, execErr.Error()).withOpID(opID),
 			ConfirmationID: input.ConfirmationID,
@@ -407,10 +438,19 @@ func (h *Handlers) ExecuteConfirmation(ctx context.Context, input ExecuteConfirm
 		}
 	}
 
-	_ = h.deps.Audit.MarkConfirmationExecuted(input.ConfirmationID)
+	if err := h.deps.Audit.MarkConfirmationExecuted(input.ConfirmationID); err != nil {
+		h.recordAuditEvent("execute_confirmation", conf.Datasource, opID, input.ConfirmationID,
+			conf.Summary, "error", 0, 0, err)
+		h.finishOperation(opID, err)
+		return ExecuteConfirmationOutput{
+			BaseOutput:     makeError(nbderrors.CodeConfirmationInvalidState, err.Error()).withOpID(opID),
+			ConfirmationID: input.ConfirmationID,
+			Status:         "failed",
+		}
+	}
 	h.recordAuditEvent("execute_confirmation", conf.Datasource, opID, input.ConfirmationID,
 		conf.Summary, "success", execResult.Elapsed.Milliseconds(), int(execResult.AffectedCount), nil)
-	h.deps.Ops.Finish(opID)
+	h.finishOperation(opID, nil)
 
 	return ExecuteConfirmationOutput{
 		BaseOutput:     BaseOutput{OK: true, OperationID: opID},
@@ -423,7 +463,7 @@ func (h *Handlers) ExecuteConfirmation(ctx context.Context, input ExecuteConfirm
 }
 
 // CancelConfirmation cancels a pending confirmation.
-func (h *Handlers) CancelConfirmation(_ context.Context, input CancelConfirmationInput) CancelConfirmationOutput {
+func (h *Handlers) CancelConfirmation(ctx context.Context, input CancelConfirmationInput) CancelConfirmationOutput {
 	conf, err := h.deps.Audit.GetConfirmation(input.ConfirmationID)
 	if err != nil {
 		return CancelConfirmationOutput{
@@ -432,7 +472,12 @@ func (h *Handlers) CancelConfirmation(_ context.Context, input CancelConfirmatio
 		}
 	}
 
+	ctx, opID := h.withOperation(ctx, "cancel_confirmation", conf.Datasource, input.ConfirmationID)
+	var opErr error
+	defer func() { h.finishOperation(opID, opErr) }()
+
 	if conf.Status != "pending" {
+		opErr = fmt.Errorf("confirmation %q is in %q state", input.ConfirmationID, conf.Status)
 		return CancelConfirmationOutput{
 			BaseOutput: makeError(nbderrors.CodeConfirmationInvalidState,
 				fmt.Sprintf("confirmation %q is in %q state, only pending can be cancelled",
@@ -443,6 +488,7 @@ func (h *Handlers) CancelConfirmation(_ context.Context, input CancelConfirmatio
 	}
 
 	if err := h.deps.Audit.MarkConfirmationCancelled(input.ConfirmationID); err != nil {
+		opErr = err
 		return CancelConfirmationOutput{
 			BaseOutput: makeError(nbderrors.CodeConfirmationInvalidState,
 				fmt.Sprintf("failed to cancel confirmation: %v", err)),
@@ -450,7 +496,7 @@ func (h *Handlers) CancelConfirmation(_ context.Context, input CancelConfirmatio
 		}
 	}
 
-	h.recordAuditEvent("cancel_confirmation", conf.Datasource, "", input.ConfirmationID,
+	h.recordAuditEvent("cancel_confirmation", conf.Datasource, opID, input.ConfirmationID,
 		conf.Summary, "cancelled", 0, 0, nil)
 
 	return CancelConfirmationOutput{
@@ -465,7 +511,11 @@ func (h *Handlers) CancelConfirmation(_ context.Context, input CancelConfirmatio
 // ---------------------------------------------------------------------------
 
 // OperationList returns recent operations, optionally filtered by status.
-func (h *Handlers) OperationList(_ context.Context, input OperationListInput) OperationListOutput {
+func (h *Handlers) OperationList(ctx context.Context, input OperationListInput) OperationListOutput {
+	_, opID := h.withOperation(ctx, "operation_list", "", "")
+	var opErr error
+	defer func() { h.finishOperation(opID, opErr) }()
+
 	limit := input.Limit
 	if limit <= 0 {
 		limit = 50
@@ -473,6 +523,7 @@ func (h *Handlers) OperationList(_ context.Context, input OperationListInput) Op
 
 	operations, err := h.deps.Audit.ListOperations(input.Status, limit)
 	if err != nil {
+		opErr = err
 		return OperationListOutput{BaseOutput: makeError(nbderrors.CodeInternalError, err.Error())}
 	}
 
@@ -511,11 +562,27 @@ func (h *Handlers) OperationList(_ context.Context, input OperationListInput) Op
 }
 
 // CancelOperation cancels an in-flight operation.
-func (h *Handlers) CancelOperation(_ context.Context, input CancelOperationInput) CancelOperationOutput {
-	if !h.deps.Ops.Cancel(input.OperationID) {
+func (h *Handlers) CancelOperation(ctx context.Context, input CancelOperationInput) CancelOperationOutput {
+	_, opID := h.withOperation(ctx, "cancel_operation", "", "")
+	var opErr error
+	defer func() { h.finishOperation(opID, opErr) }()
+
+	found, cancelErr := h.deps.Ops.CancelAfter(input.OperationID, func() error {
+		return h.deps.Audit.MarkOperationCancelRequested(input.OperationID)
+	})
+	if !found {
+		opErr = fmt.Errorf("operation %q not found or already completed", input.OperationID)
 		return CancelOperationOutput{
 			BaseOutput: makeError(nbderrors.CodeOperationNotFound,
 				fmt.Sprintf("operation %q not found or already completed", input.OperationID)),
+		}
+	}
+	if cancelErr != nil {
+		opErr = cancelErr
+		return CancelOperationOutput{
+			BaseOutput: makeError(nbderrors.CodeInternalError,
+				fmt.Sprintf("failed to mark operation cancel requested: %v", cancelErr)),
+			Status: "cancel_requested",
 		}
 	}
 	return CancelOperationOutput{
@@ -525,7 +592,11 @@ func (h *Handlers) CancelOperation(_ context.Context, input CancelOperationInput
 }
 
 // AuditRecent returns recent audit events.
-func (h *Handlers) AuditRecent(_ context.Context, input AuditRecentInput) AuditRecentOutput {
+func (h *Handlers) AuditRecent(ctx context.Context, input AuditRecentInput) AuditRecentOutput {
+	_, opID := h.withOperation(ctx, "audit_recent", input.Datasource, "")
+	var opErr error
+	defer func() { h.finishOperation(opID, opErr) }()
+
 	limit := input.Limit
 	if limit <= 0 {
 		limit = 50
@@ -533,20 +604,21 @@ func (h *Handlers) AuditRecent(_ context.Context, input AuditRecentInput) AuditR
 
 	events, err := h.deps.Audit.ListAuditEvents(input.Datasource, input.EventType, input.Status, limit)
 	if err != nil {
+		opErr = err
 		return AuditRecentOutput{BaseOutput: makeError(nbderrors.CodeInternalError, err.Error())}
 	}
 
 	results := make([]AuditEventInfo, len(events))
 	for i, evt := range events {
 		results[i] = AuditEventInfo{
-			ID:        evt.ID,
-			EventType: evt.EventType,
+			ID:         evt.ID,
+			EventType:  evt.EventType,
 			Datasource: evt.Datasource,
-			Status:    evt.Status,
-			Summary:   evt.Summary,
-			CreatedAt: evt.CreatedAt.Format(time.RFC3339),
-			ElapsedMs: evt.ElapsedMs,
-			RowCount:  evt.RowCount,
+			Status:     evt.Status,
+			Summary:    evt.Summary,
+			CreatedAt:  evt.CreatedAt.Format(time.RFC3339),
+			ElapsedMs:  evt.ElapsedMs,
+			RowCount:   evt.RowCount,
 		}
 		if evt.OperationID != "" {
 			results[i].OperationID = &evt.OperationID
@@ -566,7 +638,7 @@ func (h *Handlers) AuditRecent(_ context.Context, input AuditRecentInput) AuditR
 }
 
 // ConfirmationGet returns the current state of a confirmation.
-func (h *Handlers) ConfirmationGet(_ context.Context, input ConfirmationGetInput) ConfirmationGetOutput {
+func (h *Handlers) ConfirmationGet(ctx context.Context, input ConfirmationGetInput) ConfirmationGetOutput {
 	conf, err := h.deps.Audit.GetConfirmation(input.ConfirmationID)
 	if err != nil {
 		return ConfirmationGetOutput{
@@ -574,6 +646,9 @@ func (h *Handlers) ConfirmationGet(_ context.Context, input ConfirmationGetInput
 				fmt.Sprintf("confirmation %q not found", input.ConfirmationID)),
 		}
 	}
+
+	_, opID := h.withOperation(ctx, "confirmation_get", conf.Datasource, input.ConfirmationID)
+	defer h.finishOperation(opID, nil)
 
 	return ConfirmationGetOutput{
 		BaseOutput: BaseOutput{OK: true},

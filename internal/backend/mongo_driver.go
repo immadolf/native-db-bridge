@@ -79,6 +79,12 @@ func (b *MongoDriverBackend) Close() error {
 	return b.manager.Close()
 }
 
+// ActiveConnections returns the number of lazily-created connections
+// currently tracked by the lifecycle manager.
+func (b *MongoDriverBackend) ActiveConnections() int {
+	return b.manager.Len()
+}
+
 // Ping verifies connectivity to the given datasource.
 func (b *MongoDriverBackend) Ping(ctx context.Context, datasource string) error {
 	release, err := b.manager.Acquire(ctx, datasource)
@@ -296,6 +302,12 @@ func (b *MongoDriverBackend) Write(ctx context.Context, req MongoWriteRequest) (
 			return ExecResult{}, fmt.Errorf("mongo deleteMany %s.%s: %w", req.Datasource, req.Collection, err)
 		}
 		affected = result.DeletedCount
+
+	case "dropCollection":
+		if err := coll.Drop(ctx); err != nil {
+			return ExecResult{}, fmt.Errorf("mongo dropCollection %s.%s: %w", req.Datasource, req.Collection, err)
+		}
+		affected = 1
 
 	default:
 		return ExecResult{}, fmt.Errorf("unsupported mongo write operation: %s", req.Operation)

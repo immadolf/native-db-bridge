@@ -34,7 +34,6 @@ func IsMongoAggregateStageAllowed(stage string) bool {
 //   - deleteOne: requires filter
 //   - deleteMany: requires filter
 //   - dropCollection: no parameters, rejects filter
-//   - dropDatabase: no parameters, rejects filter
 func ValidateMongoWrite(operation string, hasFilter, hasDocument, hasDocuments bool) bool {
 	switch strings.TrimSpace(operation) {
 	case "insertOne":
@@ -53,7 +52,7 @@ func ValidateMongoWrite(operation string, hasFilter, hasDocument, hasDocuments b
 		// delete requires filter, no document
 		return hasFilter && !hasDocument && !hasDocuments
 
-	case "dropCollection", "dropDatabase":
+	case "dropCollection":
 		// drop operations must have no parameters
 		return !hasFilter && !hasDocument && !hasDocuments
 

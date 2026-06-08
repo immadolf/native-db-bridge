@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 
+	"native-db-bridge-mcp/internal/audit"
 	"native-db-bridge-mcp/internal/config"
+	"native-db-bridge-mcp/internal/ops"
 	"native-db-bridge-mcp/internal/tools"
 )
 
@@ -263,8 +266,15 @@ func newTestServer(t *testing.T) *Server {
 		Transport:   "streamable_http",
 		ClientToken: "test-token",
 	}
-	// Create handlers with zero-value deps; this is enough for auth/routing tests.
-	handlers := tools.NewHandlers(tools.Deps{})
+	store, err := audit.Open(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	handlers := tools.NewHandlers(tools.Deps{
+		Audit: store,
+		Ops:   ops.NewTracker(),
+	})
 	return NewServer(cfg, handlers)
 }
 

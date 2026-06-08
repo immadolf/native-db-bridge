@@ -90,6 +90,20 @@ func (h *Handlers) withOperation(ctx context.Context, kind, datasource, confirma
 	return ctx, opID
 }
 
+// finishOperation removes the operation from the in-memory cancellation
+// tracker and persists its terminal state in SQLite.
+func (h *Handlers) finishOperation(operationID string, err error) {
+	if operationID == "" {
+		return
+	}
+	h.deps.Ops.Finish(operationID)
+	if err != nil {
+		_ = h.deps.Audit.MarkOperationFinished(operationID, "DRIVER_ERROR", err.Error())
+		return
+	}
+	_ = h.deps.Audit.MarkOperationFinished(operationID, "", "")
+}
+
 // recordAuditEvent inserts an audit event into the store.
 func (h *Handlers) recordAuditEvent(eventType, datasource, opID, confID, summary, status string, elapsedMs int64, rowCount int, err error) {
 	evt := audit.AuditEvent{
@@ -190,9 +204,9 @@ func makeError(code nbderrors.Code, message string) BaseOutput {
 	return BaseOutput{
 		OK: false,
 		Error: &ErrorOutput{
-			Code:     string(nbdErr.Code),
-			Category: string(nbdErr.Category),
-			Message:  nbdErr.Message,
+			Code:      string(nbdErr.Code),
+			Category:  string(nbdErr.Category),
+			Message:   nbdErr.Message,
 			Retryable: nbdErr.Retryable,
 		},
 	}

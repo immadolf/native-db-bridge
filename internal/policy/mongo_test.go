@@ -33,6 +33,7 @@ func TestMongoWriteMatrix(t *testing.T) {
 		{"deleteMany ok", "deleteMany", true, false, false, true},
 		{"dropCollection ok", "dropCollection", false, false, false, true},
 		{"dropCollection rejects filter", "dropCollection", true, false, false, false},
+		{"dropDatabase rejected", "dropDatabase", false, false, false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

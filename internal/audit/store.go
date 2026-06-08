@@ -224,13 +224,13 @@ func (s *Store) MarkConfirmationFailed(id string, errSummary string) error {
 	return nil
 }
 
-// MarkConfirmationExpired transitions a confirmation to "expired".
+// MarkConfirmationExpired transitions a pending confirmation to "expired".
 func (s *Store) MarkConfirmationExpired(id string) error {
 	now := time.Now()
 	result, err := s.db.Exec(`
 		UPDATE confirmations
 		SET status='expired', updated_at=?
-		WHERE id=? AND status IN ('pending', 'executing')`,
+		WHERE id=? AND status='pending'`,
 		now, id,
 	)
 	if err != nil {
@@ -246,13 +246,13 @@ func (s *Store) MarkConfirmationExpired(id string) error {
 	return nil
 }
 
-// MarkConfirmationCancelled transitions a confirmation to "cancelled".
+// MarkConfirmationCancelled transitions a pending confirmation to "cancelled".
 func (s *Store) MarkConfirmationCancelled(id string) error {
 	now := time.Now()
 	result, err := s.db.Exec(`
 		UPDATE confirmations
 		SET status='cancelled', updated_at=?
-		WHERE id=? AND status IN ('pending', 'executing')`,
+		WHERE id=? AND status='pending'`,
 		now, id,
 	)
 	if err != nil {
@@ -331,6 +331,52 @@ func (s *Store) InsertOperation(op Operation) error {
 	)
 	if err != nil {
 		return fmt.Errorf("audit: insert operation %q: %w", op.ID, err)
+	}
+	return nil
+}
+
+// MarkOperationFinished records that an operation has completed. If errorCode
+// or errorSummary are non-empty they are persisted with the final state.
+func (s *Store) MarkOperationFinished(id, errorCode, errorSummary string) error {
+	now := time.Now()
+	result, err := s.db.Exec(`
+		UPDATE operations
+		SET status='finished', finished_at=?, error_code=NULLIF(?, ''), error_summary=NULLIF(?, '')
+		WHERE id=? AND status IN ('running', 'cancel_requested')`,
+		now, errorCode, errorSummary, id,
+	)
+	if err != nil {
+		return fmt.Errorf("audit: mark operation finished %q: %w", id, err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("audit: mark operation finished %q rows affected: %w", id, err)
+	}
+	if rows == 0 {
+		return fmt.Errorf("audit: operation %q not in a finishable state", id)
+	}
+	return nil
+}
+
+// MarkOperationCancelRequested records that cancellation was requested for an
+// in-flight operation.
+func (s *Store) MarkOperationCancelRequested(id string) error {
+	now := time.Now()
+	result, err := s.db.Exec(`
+		UPDATE operations
+		SET status='cancel_requested', cancel_requested_at=?
+		WHERE id=? AND status='running'`,
+		now, id,
+	)
+	if err != nil {
+		return fmt.Errorf("audit: mark operation cancel requested %q: %w", id, err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("audit: mark operation cancel requested %q rows affected: %w", id, err)
+	}
+	if rows == 0 {
+		return fmt.Errorf("audit: operation %q not running", id)
 	}
 	return nil
 }
