@@ -253,3 +253,83 @@ func TestOperationStatusTransitionsPersist(t *testing.T) {
 		t.Fatalf("operation error fields not persisted: %+v", finished[0])
 	}
 }
+
+func TestAuditSummaryByErrorCode(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now()
+	err = store.InsertAuditEvent(AuditEvent{
+		ID:         "evt_1",
+		EventType:  "sql_query",
+		Datasource: "saas_support",
+		Summary:    "SELECT missing_col FROM users",
+		Status:     "error",
+		ErrorCode:  "SQL_UNKNOWN_COLUMN",
+		CreatedAt:  now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateConfirmation(Confirmation{
+		ID:         "conf_1",
+		Kind:       "sql_dml",
+		Datasource: "saas_support",
+		Summary:    "UPDATE users SET name = ? WHERE id = ?",
+		RiskLevel:  "medium",
+		ImpactJSON: "{}",
+		Status:     "pending",
+		ExpiresAt:  now.Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkConfirmationExecuting("conf_1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkConfirmationExecuted("conf_1"); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := store.Summary(SummaryFilter{
+		StartTime:  now.Add(-time.Hour),
+		EndTime:    now.Add(time.Hour),
+		Datasource: "saas_support",
+		GroupBy:    "error_code",
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows=%#v", rows)
+	}
+	if rows[0].ErrorCode != "SQL_UNKNOWN_COLUMN" || rows[0].Count != 1 {
+		t.Fatalf("row=%#v", rows[0])
+	}
+	topErrors, err := store.TopErrorSummaries(SummaryFilter{
+		StartTime:  now.Add(-time.Hour),
+		EndTime:    now.Add(time.Hour),
+		Datasource: "saas_support",
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(topErrors) != 1 || topErrors[0].Summary != "SELECT missing_col FROM users" {
+		t.Fatalf("topErrors=%#v", topErrors)
+	}
+	confirmations, err := store.ConfirmationSummary(SummaryFilter{
+		StartTime:  now.Add(-time.Hour),
+		EndTime:    now.Add(time.Hour),
+		Datasource: "saas_support",
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(confirmations) != 1 || confirmations[0].Status != "executed" || confirmations[0].Count != 1 {
+		t.Fatalf("confirmations=%#v", confirmations)
+	}
+}

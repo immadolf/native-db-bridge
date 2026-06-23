@@ -274,11 +274,11 @@ func TestBuildDSN(t *testing.T) {
 
 func TestApplyLimit(t *testing.T) {
 	tests := []struct {
-		name           string
-		sql            string
-		limit          int
-		wantSQL        string
-		wantHasParam   bool
+		name         string
+		sql          string
+		limit        int
+		wantSQL      string
+		wantHasParam bool
 	}{
 		{
 			name:         "no existing limit",
@@ -301,6 +301,48 @@ func TestApplyLimit(t *testing.T) {
 			wantSQL:      "select * from users limit 10",
 			wantHasParam: false,
 		},
+		{
+			name:         "trailing semicolon",
+			sql:          "SELECT * FROM users;",
+			limit:        100,
+			wantSQL:      "SELECT * FROM (SELECT * FROM users) AS ndb_limited LIMIT ?",
+			wantHasParam: true,
+		},
+		{
+			name:         "show tables is not wrapped",
+			sql:          "SHOW TABLES;",
+			limit:        100,
+			wantSQL:      "SHOW TABLES",
+			wantHasParam: false,
+		},
+		{
+			name:         "describe is not wrapped",
+			sql:          "DESCRIBE users;",
+			limit:        100,
+			wantSQL:      "DESCRIBE users",
+			wantHasParam: false,
+		},
+		{
+			name:         "desc is not wrapped",
+			sql:          "DESC users;",
+			limit:        100,
+			wantSQL:      "DESC users",
+			wantHasParam: false,
+		},
+		{
+			name:         "explain is not wrapped",
+			sql:          "EXPLAIN SELECT * FROM users;",
+			limit:        100,
+			wantSQL:      "EXPLAIN SELECT * FROM users",
+			wantHasParam: false,
+		},
+		{
+			name:         "union without limit is wrapped",
+			sql:          "SELECT id FROM users UNION ALL SELECT id FROM admins;",
+			limit:        100,
+			wantSQL:      "SELECT * FROM (SELECT id FROM users UNION ALL SELECT id FROM admins) AS ndb_limited LIMIT ?",
+			wantHasParam: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -313,5 +355,110 @@ func TestApplyLimit(t *testing.T) {
 				t.Fatalf("applyLimit(%q, %d) hasParam = %v, want %v", tt.sql, tt.limit, gotHasParam, tt.wantHasParam)
 			}
 		})
+	}
+}
+
+func TestNormalizeSQLValue(t *testing.T) {
+	tests := []struct {
+		name string
+		in   interface{}
+		want interface{}
+	}{
+		{
+			name: "utf8 bytes become string",
+			in:   []byte("https://example.com/avatar.png"),
+			want: "https://example.com/avatar.png",
+		},
+		{
+			name: "nil stays nil",
+			in:   nil,
+			want: nil,
+		},
+		{
+			name: "int64 stays int64",
+			in:   int64(42),
+			want: int64(42),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeSQLValue(tt.in)
+			if got != tt.want {
+				t.Fatalf("normalizeSQLValue(%v) = %#v, want %#v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeSQLValueBinary(t *testing.T) {
+	got := normalizeSQLValue([]byte{0xff, 0x00, 0x01})
+	asMap, ok := got.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected binary map, got %#v", got)
+	}
+	if asMap["encoding"] != "base64" {
+		t.Fatalf("encoding=%#v", asMap["encoding"])
+	}
+	if asMap["data"] != "/wAB" {
+		t.Fatalf("data=%#v", asMap["data"])
+	}
+}
+
+func TestBuildColumnSearchQuery(t *testing.T) {
+	req := SQLColumnSearchRequest{
+		Schema:        "saas_support",
+		TablePattern:  "%user%",
+		ColumnPattern: "%avatar%",
+		DataTypes:     []string{"varchar", "text"},
+		Limit:         50,
+	}
+	gotSQL, gotArgs := buildColumnSearchQuery(req, 1000)
+	wantSQL := "SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_COMMENT FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME LIKE ? AND COLUMN_NAME LIKE ? AND DATA_TYPE IN (?, ?) ORDER BY TABLE_NAME, ORDINAL_POSITION LIMIT ?"
+	if gotSQL != wantSQL {
+		t.Fatalf("sql=%q, want %q", gotSQL, wantSQL)
+	}
+	wantArgs := []interface{}{"saas_support", "%user%", "%avatar%", "varchar", "text", 50}
+	if len(gotArgs) != len(wantArgs) {
+		t.Fatalf("args len=%d, want %d", len(gotArgs), len(wantArgs))
+	}
+	for i := range wantArgs {
+		if gotArgs[i] != wantArgs[i] {
+			t.Fatalf("arg[%d]=%#v, want %#v", i, gotArgs[i], wantArgs[i])
+		}
+	}
+}
+
+func TestBuildTextColumnPlanQuery(t *testing.T) {
+	req := SQLTextColumnPlanRequest{
+		Schema:        "saas_support",
+		TablePattern:  "uc_%",
+		ColumnPattern: "%image%",
+		MaxColumns:    25,
+	}
+	gotSQL, gotArgs := buildTextColumnPlanQuery(req, 1000)
+	wantSQL := "SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE, COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND DATA_TYPE IN (?, ?, ?, ?, ?, ?, ?) AND TABLE_NAME LIKE ? AND COLUMN_NAME LIKE ? ORDER BY TABLE_NAME, ORDINAL_POSITION LIMIT ?"
+	if gotSQL != wantSQL {
+		t.Fatalf("sql=%q, want %q", gotSQL, wantSQL)
+	}
+	wantArgs := []interface{}{"saas_support", "char", "varchar", "tinytext", "text", "mediumtext", "longtext", "json", "uc_%", "%image%", 25}
+	if len(gotArgs) != len(wantArgs) {
+		t.Fatalf("args len=%d, want %d", len(gotArgs), len(wantArgs))
+	}
+	for i := range wantArgs {
+		if gotArgs[i] != wantArgs[i] {
+			t.Fatalf("arg[%d]=%#v, want %#v", i, gotArgs[i], wantArgs[i])
+		}
+	}
+}
+
+func TestBuildTextCountSQL(t *testing.T) {
+	sqlStr, args := buildTextCountSQL("saas_support", SQLTextScanTarget{Table: "uc_user_info", Column: "avatar"}, "oss")
+	wantSQL := "SELECT COUNT(*) FROM `saas_support`.`uc_user_info` WHERE `avatar` LIKE ?"
+	if sqlStr != wantSQL {
+		t.Fatalf("sql=%q, want %q", sqlStr, wantSQL)
+	}
+	if len(args) != 1 || args[0] != "%oss%" {
+		t.Fatalf("args=%#v", args)
 	}
 }

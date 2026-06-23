@@ -321,6 +321,46 @@ type AuditEvent struct {
 	CreatedAt      time.Time
 }
 
+// SummaryFilter constrains audit summary queries.
+type SummaryFilter struct {
+	StartTime  time.Time
+	EndTime    time.Time
+	Datasource string
+	EventType  string
+	Status     string
+	GroupBy    string
+	Limit      int
+}
+
+// SummaryRow describes one grouped audit summary row.
+type SummaryRow struct {
+	Bucket       string
+	EventType    string
+	Datasource   string
+	Status       string
+	ErrorCode    string
+	Count        int
+	Slow1sCount  int
+	Slow5sCount  int
+	Slow10sCount int
+}
+
+// TopErrorSummary describes a representative failed audit summary.
+type TopErrorSummary struct {
+	ErrorCode string
+	Summary   string
+	Count     int
+}
+
+// ConfirmationSummaryRow describes confirmation status counts.
+type ConfirmationSummaryRow struct {
+	Kind       string
+	Datasource string
+	Status     string
+	Count      int
+	ErrorCount int
+}
+
 // InsertOperation inserts a new operation record.
 func (s *Store) InsertOperation(op Operation) error {
 	_, err := s.db.Exec(`
@@ -476,4 +516,172 @@ func (s *Store) ListAuditEvents(datasource, eventType, status string, limit int)
 		events = append(events, evt)
 	}
 	return events, rows.Err()
+}
+
+// Summary groups audit events by the requested bucket and includes slow counts.
+func (s *Store) Summary(filter SummaryFilter) ([]SummaryRow, error) {
+	if filter.Limit <= 0 {
+		filter.Limit = 50
+	}
+	if filter.GroupBy == "" {
+		filter.GroupBy = "error_code"
+	}
+
+	groupExpr := "COALESCE(error_code, '')"
+	switch filter.GroupBy {
+	case "day":
+		groupExpr = "substr(created_at, 1, 10)"
+	case "event_type":
+		groupExpr = "event_type"
+	case "datasource":
+		groupExpr = "datasource"
+	case "status":
+		groupExpr = "status"
+	case "error_code":
+		groupExpr = "COALESCE(error_code, '')"
+	}
+
+	query := fmt.Sprintf(`SELECT %s AS bucket,
+		COALESCE(event_type, ''), COALESCE(datasource, ''), COALESCE(status, ''), COALESCE(error_code, ''),
+		COUNT(*),
+		SUM(CASE WHEN elapsed_ms >= 1000 THEN 1 ELSE 0 END),
+		SUM(CASE WHEN elapsed_ms >= 5000 THEN 1 ELSE 0 END),
+		SUM(CASE WHEN elapsed_ms >= 10000 THEN 1 ELSE 0 END)
+		FROM audit_events WHERE 1=1`, groupExpr)
+	args := []interface{}{}
+	if !filter.StartTime.IsZero() {
+		query += " AND created_at >= ?"
+		args = append(args, filter.StartTime)
+	}
+	if !filter.EndTime.IsZero() {
+		query += " AND created_at <= ?"
+		args = append(args, filter.EndTime)
+	}
+	if filter.Datasource != "" {
+		query += " AND datasource = ?"
+		args = append(args, filter.Datasource)
+	}
+	if filter.EventType != "" {
+		query += " AND event_type = ?"
+		args = append(args, filter.EventType)
+	}
+	if filter.Status != "" {
+		query += " AND status = ?"
+		args = append(args, filter.Status)
+	}
+	query += fmt.Sprintf(" GROUP BY %s, COALESCE(event_type, ''), COALESCE(datasource, ''), COALESCE(status, ''), COALESCE(error_code, '') ORDER BY COUNT(*) DESC LIMIT ?", groupExpr)
+	args = append(args, filter.Limit)
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("audit: summary: %w", err)
+	}
+	defer rows.Close()
+
+	var results []SummaryRow
+	for rows.Next() {
+		var row SummaryRow
+		if err := rows.Scan(&row.Bucket, &row.EventType, &row.Datasource, &row.Status, &row.ErrorCode, &row.Count, &row.Slow1sCount, &row.Slow5sCount, &row.Slow10sCount); err != nil {
+			return nil, fmt.Errorf("audit: scan summary: %w", err)
+		}
+		results = append(results, row)
+	}
+	return results, rows.Err()
+}
+
+// TopErrorSummaries returns representative failed audit event summaries.
+func (s *Store) TopErrorSummaries(filter SummaryFilter) ([]TopErrorSummary, error) {
+	if filter.Limit <= 0 {
+		filter.Limit = 10
+	}
+	query := `SELECT COALESCE(error_code, ''), COALESCE(summary, ''), COUNT(*)
+		FROM audit_events WHERE COALESCE(error_code, '') != '' AND COALESCE(summary, '') != ''`
+	args := []interface{}{}
+	if filter.Status == "" {
+		query += " AND status = 'error'"
+	}
+	if !filter.StartTime.IsZero() {
+		query += " AND created_at >= ?"
+		args = append(args, filter.StartTime)
+	}
+	if !filter.EndTime.IsZero() {
+		query += " AND created_at <= ?"
+		args = append(args, filter.EndTime)
+	}
+	if filter.Datasource != "" {
+		query += " AND datasource = ?"
+		args = append(args, filter.Datasource)
+	}
+	if filter.EventType != "" {
+		query += " AND event_type = ?"
+		args = append(args, filter.EventType)
+	}
+	if filter.Status != "" {
+		query += " AND status = ?"
+		args = append(args, filter.Status)
+	}
+	query += " GROUP BY error_code, summary ORDER BY COUNT(*) DESC LIMIT ?"
+	args = append(args, filter.Limit)
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("audit: top error summaries: %w", err)
+	}
+	defer rows.Close()
+
+	var results []TopErrorSummary
+	for rows.Next() {
+		var row TopErrorSummary
+		if err := rows.Scan(&row.ErrorCode, &row.Summary, &row.Count); err != nil {
+			return nil, fmt.Errorf("audit: scan top error summaries: %w", err)
+		}
+		results = append(results, row)
+	}
+	return results, rows.Err()
+}
+
+// ConfirmationSummary groups confirmation records by kind, datasource, and status.
+func (s *Store) ConfirmationSummary(filter SummaryFilter) ([]ConfirmationSummaryRow, error) {
+	if filter.Limit <= 0 {
+		filter.Limit = 50
+	}
+	query := `SELECT COALESCE(kind, ''), COALESCE(datasource, ''), COALESCE(status, ''),
+		COUNT(*),
+		SUM(CASE WHEN COALESCE(error_summary, '') != '' THEN 1 ELSE 0 END)
+		FROM confirmations WHERE 1=1`
+	args := []interface{}{}
+	if !filter.StartTime.IsZero() {
+		query += " AND created_at >= ?"
+		args = append(args, filter.StartTime)
+	}
+	if !filter.EndTime.IsZero() {
+		query += " AND created_at <= ?"
+		args = append(args, filter.EndTime)
+	}
+	if filter.Datasource != "" {
+		query += " AND datasource = ?"
+		args = append(args, filter.Datasource)
+	}
+	if filter.Status != "" {
+		query += " AND status = ?"
+		args = append(args, filter.Status)
+	}
+	query += " GROUP BY kind, datasource, status ORDER BY COUNT(*) DESC LIMIT ?"
+	args = append(args, filter.Limit)
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("audit: confirmation summary: %w", err)
+	}
+	defer rows.Close()
+
+	var results []ConfirmationSummaryRow
+	for rows.Next() {
+		var row ConfirmationSummaryRow
+		if err := rows.Scan(&row.Kind, &row.Datasource, &row.Status, &row.Count, &row.ErrorCount); err != nil {
+			return nil, fmt.Errorf("audit: scan confirmation summary: %w", err)
+		}
+		results = append(results, row)
+	}
+	return results, rows.Err()
 }

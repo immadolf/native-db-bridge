@@ -9,6 +9,8 @@
 - `sql_query` 的自动 `LIMIT` 包装对 `SHOW`、尾部分号等场景不兼容。
 - MySQL 文本列以 `[]byte` 形式进入 JSON 后会变成 Base64，影响直接阅读和二次处理。
 - 错误码过粗，语法错、未知字段、缺表、超时都容易表现为 `DRIVER_ERROR`。
+- `execute_confirmation` 执行 SQL 写确认失败时仍可能退化为粗粒度 driver error，不利于判断是字段、语法还是连接问题。
+- `performance_schema`、`SHOW PROCESSLIST`、`SHOW GLOBAL STATUS` 等系统/权限诊断语句失败后，agent 缺少明确的替代排查路径。
 - 审计复盘需要直接查询 SQLite 并手工 join，不利于后续持续改进。
 
 本设计聚焦 MySQL/SQL 工具，不扩展 Redis、MongoDB，不改变生产隔离策略。
@@ -22,7 +24,9 @@
 - 修正 `sql_query` 基础兼容问题，让只读查询工具行为稳定。
 - 让 SQL 查询结果对人和 agent 都可直接阅读，避免文本列 Base64 绕路。
 - 细化 MySQL 错误分类，让失败后能明确选择下一步。
+- 让 SQL 写确认执行失败复用同一套 MySQL 错误分类，避免读写 SQL 链路分类语义不一致。
 - 在后续阶段提供审计摘要能力，支持按时间、数据源、工具和错误类型复盘。
+- 为权限受限的系统诊断类查询提供文档化替代路径，减少 agent 反复重试无权限语句。
 
 ### 2.2 非目标
 
@@ -98,7 +102,7 @@
 约束：
 
 - P0 只生成计划，不查询业务表。
-- 候选列限定为文本类字段：`char`、`varchar`、`text`、`mediumtext`、`longtext`、`json` 等。
+- 候选列限定为文本类字段：`char`、`varchar`、`tinytext`、`text`、`mediumtext`、`longtext`、`json` 等。
 - 不自动执行宽范围扫描。
 
 ### 4.3 `sql_text_scan`
@@ -112,21 +116,21 @@
 - `targets`：待扫描字段列表，每项包含 `table` 和 `column`。
 - `keywords`：关键词列表。
 - `mode`：P0 只支持 `count`。
-- `max_columns_per_query`：每组最多字段数。
-- `timeout`：可选，但不能超过全局查询超时。
+- `max_columns_per_query`：P0 接收但不合并多字段批次；P2 分批增强时作为每组最多字段数。
+- `timeout`：可选，单次字段/关键词扫描超时，不能超过全局查询超时。
 
 输出：
 
-- 每个表字段的命中数量。
-- 每个扫描批次的耗时。
-- 是否超时或被跳过。
+- 每个表字段和关键词的命中数量。
+- 每次字段/关键词扫描的耗时。
+- 是否超时。
 - 若失败，返回对应字段和可行动错误。
 
 约束：
 
 - P0 不返回原始业务行，避免结果过大。
 - 只生成 `COUNT` 聚合。
-- 每批 SQL 必须受字段数和超时控制。
+- P0 每条 SQL 只扫描一个字段和一个关键词，并受单次 `timeout` 控制；P2 再扩展多字段批次与 skipped 标记。
 
 ### 4.4 `sql_query` 修正
 
@@ -146,9 +150,14 @@ MySQL 错误需要映射为更具体的结构化错误：
 - `1146 Table doesn't exist` -> `SQL_UNKNOWN_TABLE`，不可重试，建议先使用 `sql_object_list`。
 - `1064 syntax` -> `QUERY_SYNTAX_ERROR`，不可重试，保留 MySQL near 片段。
 - `context deadline exceeded` -> `QUERY_TIMEOUT`，可重试，但建议缩小范围或改用 `sql_text_scan`。
-- `broken pipe` / `connection reset by peer` -> `CONNECTION_FAILED` 或保留 `DRIVER_ERROR`，可重试。
+- `broken pipe` / `connection reset by peer` -> `CONNECTION_FAILED`，可重试。
 
 `DRIVER_ERROR` 不再默认覆盖所有 SQL 失败。不可重试错误的 `retryable` 必须为 `false`，避免 agent 盲目重跑。
+
+SQL 读查询和 SQL 写确认执行失败必须复用同一套分类逻辑。`execute_confirmation`
+遇到 `sql_dml` 或 `sql_ddl` 后端执行错误时，工具输出、operation error_code 和 audit
+event error_code 均应记录分类后的 SQL 错误码；Redis/Mongo 写确认继续保留现有通用 driver
+分类，避免扩大本阶段范围。
 
 ## 6. 审计分期
 
@@ -173,15 +182,20 @@ MySQL 错误需要映射为更具体的结构化错误：
 输出：
 
 - 按日期、工具、数据源、状态、错误码聚合的数量。
-- top error summaries。
+- top error summaries，至少包含错误码、代表性错误摘要和出现次数。
 - 慢查询数量分布，例如 `>=1s`、`>=5s`、`>=10s`。
-- 写确认数量和执行结果摘要。
+- 写确认数量和执行结果摘要，至少按确认状态统计 executed、failed、expired、cancelled、pending 等数量。
+- 写确认失败摘要，至少能看到 failed 数量和失败 confirmation 的 error_count，后续可扩展代表性错误摘要。
 
 P1 目标是让复盘不再依赖手写 SQLite join。
 
 ### P2
 
 考虑加入可选 `context_label`，用于让 agent 在调用工具时写入任务标签。该字段只作为审计辅助，不作为 MCP 会话强依赖。
+
+README 增加权限/系统诊断说明：遇到 `performance_schema`、`SHOW PROCESSLIST`、`SHOW GLOBAL STATUS`
+等权限失败时，优先返回结构化错误并提示使用普通 schema 元数据工具、受控文本扫描或让用户确认授权边界；
+不自动改用高权限探针，不反复重试同一类无权限语句。
 
 ## 7. 阶段拆分
 
@@ -194,6 +208,7 @@ P1 目标是让复盘不再依赖手写 SQLite join。
 - `sql_text_scan` 的 count 模式
 - `sql_query` LIMIT/尾部分号/文本列归一化修正
 - MySQL 错误分类和 retryable 语义修正
+- SQL 写确认执行失败复用 MySQL 错误分类
 
 验收标准：
 
@@ -201,7 +216,10 @@ P1 目标是让复盘不再依赖手写 SQLite join。
 - 尾部分号不会导致 `near ';) AS ndb_limited LIMIT ?'`。
 - UTF-8 文本列不再以 Base64 展示。
 - `1054`、`1146`、`1064`、超时分别映射到明确错误码。
+- `execute_confirmation` 执行 SQL 写确认失败时也返回并审计明确 SQL 错误码。
 - agent 能先用 `sql_column_search` 找字段，再执行业务查询。
+- agent 能用 `sql_text_column_plan` 基于真实元数据生成文本列扫描候选。
+- `sql_text_scan` count 模式能按字段/关键词返回命中数、耗时和超时状态。
 
 ### P1：审计复盘能力
 
@@ -246,4 +264,3 @@ README 增加：
 - 文本列扫描和审计复盘示例。
 
 实现计划需在本设计确认后单独生成，不在本设计文档中展开代码级步骤。
-

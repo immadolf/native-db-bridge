@@ -69,7 +69,7 @@ type mcpTextContent struct {
 // toolHandler is a function that dispatches raw JSON params to a typed handler.
 type toolHandler func(ctx context.Context, params json.RawMessage) (interface{}, error)
 
-// buildDispatcher creates the method-name-to-handler mapping for all 24 MCP tools.
+// buildDispatcher creates the method-name-to-handler mapping for all MCP tools.
 func buildDispatcher(h *tools.Handlers) map[string]toolHandler {
 	return map[string]toolHandler{
 		// Metadata tools
@@ -122,6 +122,20 @@ func buildDispatcher(h *tools.Handlers) map[string]toolHandler {
 			}
 			return h.SQLTablePreview(ctx, input), nil
 		},
+		"sql_column_search": func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+			var input tools.SQLColumnSearchInput
+			if err := json.Unmarshal(params, &input); err != nil {
+				return nil, fmt.Errorf("invalid params: %w", err)
+			}
+			return h.SQLColumnSearch(ctx, input), nil
+		},
+		"sql_text_column_plan": func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+			var input tools.SQLTextColumnPlanInput
+			if err := json.Unmarshal(params, &input); err != nil {
+				return nil, fmt.Errorf("invalid params: %w", err)
+			}
+			return h.SQLTextColumnPlan(ctx, input), nil
+		},
 		"redis_key_scan": func(ctx context.Context, params json.RawMessage) (interface{}, error) {
 			var input tools.RedisKeyScanInput
 			if err := json.Unmarshal(params, &input); err != nil {
@@ -165,6 +179,13 @@ func buildDispatcher(h *tools.Handlers) map[string]toolHandler {
 				return nil, fmt.Errorf("invalid params: %w", err)
 			}
 			return h.SQLQuery(ctx, input), nil
+		},
+		"sql_text_scan": func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+			var input tools.SQLTextScanInput
+			if err := json.Unmarshal(params, &input); err != nil {
+				return nil, fmt.Errorf("invalid params: %w", err)
+			}
+			return h.SQLTextScan(ctx, input), nil
 		},
 		"sql_prepare_change": func(ctx context.Context, params json.RawMessage) (interface{}, error) {
 			var input tools.SQLPrepareChangeInput
@@ -231,6 +252,13 @@ func buildDispatcher(h *tools.Handlers) map[string]toolHandler {
 			}
 			return h.AuditRecent(ctx, input), nil
 		},
+		"audit_summary": func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+			var input tools.AuditSummaryInput
+			if err := json.Unmarshal(params, &input); err != nil {
+				return nil, fmt.Errorf("invalid params: %w", err)
+			}
+			return h.AuditSummary(ctx, input), nil
+		},
 		"confirmation_get": func(ctx context.Context, params json.RawMessage) (interface{}, error) {
 			var input tools.ConfirmationGetInput
 			if err := json.Unmarshal(params, &input); err != nil {
@@ -258,12 +286,15 @@ func buildMCPTools() []MCPTool {
 		"sql_object_list":           inputTypeOf[tools.SQLObjectListInput](),
 		"sql_object_describe":       inputTypeOf[tools.SQLObjectDescribeInput](),
 		"sql_table_preview":         inputTypeOf[tools.SQLTablePreviewInput](),
+		"sql_column_search":         inputTypeOf[tools.SQLColumnSearchInput](),
+		"sql_text_column_plan":      inputTypeOf[tools.SQLTextColumnPlanInput](),
 		"redis_key_scan":            inputTypeOf[tools.RedisKeyScanInput](),
 		"redis_key_describe":        inputTypeOf[tools.RedisKeyDescribeInput](),
 		"mongo_database_list":       inputTypeOf[tools.MongoDatabaseListInput](),
 		"mongo_collection_list":     inputTypeOf[tools.MongoCollectionListInput](),
 		"mongo_collection_describe": inputTypeOf[tools.MongoCollectionDescribeInput](),
 		"sql_query":                 inputTypeOf[tools.SQLQueryInput](),
+		"sql_text_scan":             inputTypeOf[tools.SQLTextScanInput](),
 		"sql_prepare_change":        inputTypeOf[tools.SQLPrepareChangeInput](),
 		"redis_command":             inputTypeOf[tools.RedisCommandInput](),
 		"redis_prepare_change":      inputTypeOf[tools.RedisPrepareChangeInput](),
@@ -273,6 +304,7 @@ func buildMCPTools() []MCPTool {
 		"operation_list":            inputTypeOf[tools.OperationListInput](),
 		"cancel_operation":          inputTypeOf[tools.CancelOperationInput](),
 		"audit_recent":              inputTypeOf[tools.AuditRecentInput](),
+		"audit_summary":             inputTypeOf[tools.AuditSummaryInput](),
 		"confirmation_get":          inputTypeOf[tools.ConfirmationGetInput](),
 		"cancel_confirmation":       inputTypeOf[tools.CancelConfirmationInput](),
 	}
@@ -285,12 +317,15 @@ func buildMCPTools() []MCPTool {
 		"sql_object_list":           "List SQL tables, views, or other schema objects.",
 		"sql_object_describe":       "Describe a SQL object including columns, indexes, and definition.",
 		"sql_table_preview":         "Preview rows from a SQL table with a bounded limit.",
+		"sql_column_search":         "Search MySQL column metadata by schema, table pattern, column pattern, and data type.",
+		"sql_text_column_plan":      "Build a safe MySQL text-column scan plan from metadata without scanning business rows.",
 		"redis_key_scan":            "Scan Redis keys with cursor pagination.",
 		"redis_key_describe":        "Describe one Redis key including type, TTL, length, and existence.",
 		"mongo_database_list":       "List MongoDB databases for a datasource.",
 		"mongo_collection_list":     "List MongoDB collections for a datasource.",
 		"mongo_collection_describe": "Describe a MongoDB collection including indexes and sample schema.",
 		"sql_query":                 "Run a read-only SQL query with limit and timeout controls.",
+		"sql_text_scan":             "Run controlled count-only scans across selected MySQL text columns.",
 		"sql_prepare_change":        "Prepare a SQL write operation and create a confirmation record.",
 		"redis_command":             "Run an allowed read-only Redis command.",
 		"redis_prepare_change":      "Prepare a Redis write command and create a confirmation record.",
@@ -300,6 +335,7 @@ func buildMCPTools() []MCPTool {
 		"operation_list":            "List recent or running operations.",
 		"cancel_operation":          "Request cancellation of a running operation.",
 		"audit_recent":              "List recent audit events.",
+		"audit_summary":             "Summarize audit events by time, datasource, status, event type, or error code.",
 		"confirmation_get":          "Get the current state of a write confirmation.",
 		"cancel_confirmation":       "Cancel a pending write confirmation.",
 	}

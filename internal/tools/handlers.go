@@ -16,21 +16,24 @@ import (
 	"native-db-bridge-mcp/internal/ops"
 )
 
-// SQLMetaBackend extends backend.SQLBackend with schema introspection methods
-// needed by the metadata tools.
-type SQLMetaBackend interface {
+// SQLWorkflowBackend extends backend.SQLBackend with schema introspection and
+// agent-oriented MySQL workflow methods needed by SQL tools.
+type SQLWorkflowBackend interface {
 	backend.SQLBackend
 	SchemaList(ctx context.Context, datasource string) ([]string, error)
 	ObjectTypeList(ctx context.Context, datasource string) ([]string, error)
 	ObjectList(ctx context.Context, datasource, schema, objectType, namePattern string) ([]backend.SQLObjectInfo, error)
 	DescribeObject(ctx context.Context, datasource, schema, objectName, objectType string) (backend.SQLDescribeResult, error)
+	ColumnSearch(ctx context.Context, req backend.SQLColumnSearchRequest) ([]backend.SQLColumnSearchResult, error)
+	TextColumnPlan(ctx context.Context, req backend.SQLTextColumnPlanRequest) (backend.SQLTextColumnPlanResult, error)
+	TextScan(ctx context.Context, req backend.SQLTextScanRequest) (backend.SQLTextScanResult, error)
 }
 
 // Deps holds all dependencies injected into Handlers.
 type Deps struct {
 	Config config.Config
 	Audit  *audit.Store
-	SQL    SQLMetaBackend
+	SQL    SQLWorkflowBackend
 	Redis  backend.RedisBackend
 	Mongo  backend.MongoBackend
 	Ops    *ops.Tracker
@@ -104,6 +107,16 @@ func (h *Handlers) finishOperation(operationID string, err error) {
 	_ = h.deps.Audit.MarkOperationFinished(operationID, "", "")
 }
 
+func (h *Handlers) finishSQLOperation(operationID string, err error) {
+	if err == nil {
+		h.finishOperation(operationID, nil)
+		return
+	}
+	classified := nbderrors.ClassifySQLErrorMessage(err.Error())
+	h.deps.Ops.Finish(operationID)
+	_ = h.deps.Audit.MarkOperationFinished(operationID, string(classified.Code), err.Error())
+}
+
 // recordAuditEvent inserts an audit event into the store.
 func (h *Handlers) recordAuditEvent(eventType, datasource, opID, confID, summary, status string, elapsedMs int64, rowCount int, err error) {
 	evt := audit.AuditEvent{
@@ -120,6 +133,25 @@ func (h *Handlers) recordAuditEvent(eventType, datasource, opID, confID, summary
 	}
 	if err != nil {
 		evt.ErrorCode = "DRIVER_ERROR"
+	}
+	_ = h.deps.Audit.InsertAuditEvent(evt)
+}
+
+func (h *Handlers) recordSQLAuditEvent(eventType, datasource, opID, confID, summary, status string, elapsedMs int64, rowCount int, err error) {
+	evt := audit.AuditEvent{
+		ID:             "evt_" + uuid.New().String(),
+		EventType:      eventType,
+		Datasource:     datasource,
+		OperationID:    opID,
+		ConfirmationID: confID,
+		Summary:        summary,
+		Status:         status,
+		ElapsedMs:      elapsedMs,
+		RowCount:       rowCount,
+		CreatedAt:      time.Now(),
+	}
+	if err != nil {
+		evt.ErrorCode = string(nbderrors.ClassifySQLErrorMessage(err.Error()).Code)
 	}
 	_ = h.deps.Audit.InsertAuditEvent(evt)
 }
@@ -208,6 +240,18 @@ func makeError(code nbderrors.Code, message string) BaseOutput {
 			Category:  string(nbdErr.Category),
 			Message:   nbdErr.Message,
 			Retryable: nbdErr.Retryable,
+		},
+	}
+}
+
+func makeErrorFromNative(err *nbderrors.Error) BaseOutput {
+	return BaseOutput{
+		OK: false,
+		Error: &ErrorOutput{
+			Code:      string(err.Code),
+			Category:  string(err.Category),
+			Message:   err.Message,
+			Retryable: err.Retryable,
 		},
 	}
 }

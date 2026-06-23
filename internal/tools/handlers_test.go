@@ -18,18 +18,28 @@ import (
 // ---------------------------------------------------------------------------
 
 type fakeSQLBackend struct {
-	queryCalled      bool
-	execCalled       bool
-	previewCalled    bool
-	schemaListCalled bool
-	queryResult      backend.SQLResult
-	queryErr         error
-	execResult       backend.ExecResult
-	previewResult    backend.SQLResult
-	schemas          []string
-	objectTypes      []string
-	objects          []backend.SQLObjectInfo
-	describeResult   backend.SQLDescribeResult
+	queryCalled        bool
+	execCalled         bool
+	previewCalled      bool
+	schemaListCalled   bool
+	columnSearchCalled bool
+	textPlanCalled     bool
+	textScanCalled     bool
+	queryResult        backend.SQLResult
+	queryErr           error
+	execResult         backend.ExecResult
+	execErr            error
+	previewResult      backend.SQLResult
+	schemas            []string
+	columnSearchReq    backend.SQLColumnSearchRequest
+	columnSearchRows   []backend.SQLColumnSearchResult
+	textPlanReq        backend.SQLTextColumnPlanRequest
+	textPlanResult     backend.SQLTextColumnPlanResult
+	textScanReq        backend.SQLTextScanRequest
+	textScanResult     backend.SQLTextScanResult
+	objectTypes        []string
+	objects            []backend.SQLObjectInfo
+	describeResult     backend.SQLDescribeResult
 }
 
 func (f *fakeSQLBackend) Ping(_ context.Context, _ string) error { return nil }
@@ -44,6 +54,9 @@ func (f *fakeSQLBackend) Query(_ context.Context, _ string, _ string, _ int) (ba
 
 func (f *fakeSQLBackend) Exec(_ context.Context, _ string, _ string) (backend.ExecResult, error) {
 	f.execCalled = true
+	if f.execErr != nil {
+		return backend.ExecResult{}, f.execErr
+	}
 	return f.execResult, nil
 }
 
@@ -67,6 +80,24 @@ func (f *fakeSQLBackend) ObjectList(_ context.Context, _, _, _, _ string) ([]bac
 
 func (f *fakeSQLBackend) DescribeObject(_ context.Context, _, _, _, _ string) (backend.SQLDescribeResult, error) {
 	return f.describeResult, nil
+}
+
+func (f *fakeSQLBackend) ColumnSearch(_ context.Context, req backend.SQLColumnSearchRequest) ([]backend.SQLColumnSearchResult, error) {
+	f.columnSearchCalled = true
+	f.columnSearchReq = req
+	return f.columnSearchRows, nil
+}
+
+func (f *fakeSQLBackend) TextColumnPlan(_ context.Context, req backend.SQLTextColumnPlanRequest) (backend.SQLTextColumnPlanResult, error) {
+	f.textPlanCalled = true
+	f.textPlanReq = req
+	return f.textPlanResult, nil
+}
+
+func (f *fakeSQLBackend) TextScan(_ context.Context, req backend.SQLTextScanRequest) (backend.SQLTextScanResult, error) {
+	f.textScanCalled = true
+	f.textScanReq = req
+	return f.textScanResult, nil
 }
 
 type fakeRedisBackend struct {
@@ -374,6 +405,193 @@ func TestDatasourceListFiltersByTypeAndEnvironment(t *testing.T) {
 	}
 	if redisDev.Datasources[0].Name != "redis-dev" {
 		t.Fatalf("expected redis-dev, got %s", redisDev.Datasources[0].Name)
+	}
+}
+
+func TestSQLQueryClassifiesUnknownColumn(t *testing.T) {
+	h := newTestHandlers(t)
+	h.fakeSQL.queryErr = fmt.Errorf("sql query saas_support: Error 1054 (42S22): Unknown column 'remark' in 'field list'")
+
+	output := h.SQLQuery(context.Background(), SQLQueryInput{
+		Datasource: "saas_support",
+		SQL:        "SELECT remark FROM users",
+	})
+	if output.OK {
+		t.Fatal("expected sql_query to fail")
+	}
+	if output.Error.Code != "SQL_UNKNOWN_COLUMN" {
+		t.Fatalf("code=%s", output.Error.Code)
+	}
+	if output.Error.Retryable {
+		t.Fatal("unknown column should not be retryable")
+	}
+}
+
+func TestExecuteSQLConfirmationClassifiesUnknownColumn(t *testing.T) {
+	h := newTestHandlers(t)
+	h.fakeSQL.execErr = fmt.Errorf("sql exec saas_support: Error 1054 (42S22): Unknown column 'remark' in 'field list'")
+
+	prepared := h.SQLPrepareChange(context.Background(), SQLPrepareChangeInput{
+		Datasource: "saas_support",
+		SQL:        "UPDATE users SET remark = 'x' WHERE id = 1",
+	})
+	if !prepared.OK {
+		t.Fatalf("prepare failed: %s", prepared.Error.Message)
+	}
+
+	output := h.ExecuteConfirmation(context.Background(), ExecuteConfirmationInput{
+		ConfirmationID: prepared.ConfirmationID,
+	})
+	if output.OK {
+		t.Fatal("expected execute_confirmation to fail")
+	}
+	if output.Error.Code != "SQL_UNKNOWN_COLUMN" {
+		t.Fatalf("code=%s", output.Error.Code)
+	}
+}
+
+func TestSQLColumnSearchSuccess(t *testing.T) {
+	h := newTestHandlers(t)
+	h.fakeSQL.columnSearchRows = []backend.SQLColumnSearchResult{
+		{Schema: "saas_support", Table: "uc_user_info", Column: "avatar", DataType: "varchar", ColumnType: "varchar(512)", Nullable: true},
+	}
+
+	output := h.SQLColumnSearch(context.Background(), SQLColumnSearchInput{
+		Datasource:    "saas_support",
+		Schema:        "saas_support",
+		ColumnPattern: "%avatar%",
+		DataTypes:     []string{"varchar"},
+		Limit:         20,
+	})
+	if !output.OK {
+		t.Fatalf("sql_column_search failed: %s", output.Error.Message)
+	}
+	if !h.fakeSQL.columnSearchCalled {
+		t.Fatal("ColumnSearch should be called")
+	}
+	if h.fakeSQL.columnSearchReq.Schema != "saas_support" {
+		t.Fatalf("schema=%s", h.fakeSQL.columnSearchReq.Schema)
+	}
+	if len(output.Columns) != 1 || output.Columns[0].Column != "avatar" {
+		t.Fatalf("columns=%#v", output.Columns)
+	}
+}
+
+func TestSQLTextColumnPlanSuccess(t *testing.T) {
+	h := newTestHandlers(t)
+	h.fakeSQL.textPlanResult = backend.SQLTextColumnPlanResult{
+		Candidates: []backend.SQLTextColumnCandidate{
+			{Schema: "saas_support", Table: "uc_user_info", Column: "avatar", DataType: "varchar", ColumnType: "varchar(512)"},
+		},
+		Batches: []backend.SQLTextScanBatch{
+			{
+				Targets:  []backend.SQLTextScanTarget{{Table: "uc_user_info", Column: "avatar"}},
+				Keywords: []string{"oss"},
+			},
+		},
+	}
+
+	output := h.SQLTextColumnPlan(context.Background(), SQLTextColumnPlanInput{
+		Datasource:    "saas_support",
+		Schema:        "saas_support",
+		ColumnPattern: "%avatar%",
+		Keywords:      []string{"oss"},
+		MaxColumns:    20,
+	})
+	if !output.OK {
+		t.Fatalf("sql_text_column_plan failed: %s", output.Error.Message)
+	}
+	if !h.fakeSQL.textPlanCalled {
+		t.Fatal("TextColumnPlan should be called")
+	}
+	if len(output.Candidates) != 1 || output.Candidates[0].Column != "avatar" {
+		t.Fatalf("candidates=%#v", output.Candidates)
+	}
+}
+
+func TestSQLTextScanSuccess(t *testing.T) {
+	h := newTestHandlers(t)
+	h.fakeSQL.textScanResult = backend.SQLTextScanResult{
+		Matches: []backend.SQLTextScanMatch{
+			{Table: "uc_user_info", Column: "avatar", Keyword: "oss", Count: 12, Elapsed: 3 * time.Millisecond},
+		},
+	}
+
+	output := h.SQLTextScan(context.Background(), SQLTextScanInput{
+		Datasource: "saas_support",
+		Schema:     "saas_support",
+		Targets:    []backend.SQLTextScanTarget{{Table: "uc_user_info", Column: "avatar"}},
+		Keywords:   []string{"oss"},
+		Mode:       "count",
+		Timeout:    "5s",
+	})
+	if !output.OK {
+		t.Fatalf("sql_text_scan failed: %s", output.Error.Message)
+	}
+	if !h.fakeSQL.textScanCalled {
+		t.Fatal("TextScan should be called")
+	}
+	if len(output.Matches) != 1 || output.Matches[0].Count != 12 {
+		t.Fatalf("matches=%#v", output.Matches)
+	}
+	if h.fakeSQL.textScanReq.Timeout != 5*time.Second {
+		t.Fatalf("timeout=%s", h.fakeSQL.textScanReq.Timeout)
+	}
+}
+
+func TestAuditSummaryIncludesTopErrorsAndConfirmations(t *testing.T) {
+	h := newTestHandlers(t)
+	now := time.Now()
+	if err := h.deps.Audit.InsertAuditEvent(audit.AuditEvent{
+		ID:         "evt_summary_1",
+		EventType:  "sql_query",
+		Datasource: "saas_support",
+		Summary:    "SELECT missing_col FROM users",
+		Status:     "error",
+		ErrorCode:  "SQL_UNKNOWN_COLUMN",
+		CreatedAt:  now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.deps.Audit.CreateConfirmation(audit.Confirmation{
+		ID:         "conf_summary_1",
+		Kind:       "sql_dml",
+		Datasource: "saas_support",
+		Summary:    "UPDATE users SET name = ? WHERE id = ?",
+		RiskLevel:  "medium",
+		ImpactJSON: "{}",
+		Status:     "pending",
+		ExpiresAt:  now.Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.deps.Audit.MarkConfirmationExecuting("conf_summary_1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.deps.Audit.MarkConfirmationExecuted("conf_summary_1"); err != nil {
+		t.Fatal(err)
+	}
+
+	output := h.AuditSummary(context.Background(), AuditSummaryInput{
+		StartTime:  now.Add(-time.Hour).Format(time.RFC3339),
+		EndTime:    now.Add(time.Hour).Format(time.RFC3339),
+		Datasource: "saas_support",
+		EventType:  "sql_query",
+		Status:     "success",
+		GroupBy:    "error_code",
+		Limit:      10,
+	})
+	if !output.OK {
+		t.Fatalf("audit_summary failed: %s", output.Error.Message)
+	}
+	if len(output.Rows) != 0 {
+		t.Fatalf("rows=%#v", output.Rows)
+	}
+	if len(output.TopErrors) != 1 || output.TopErrors[0].Summary != "SELECT missing_col FROM users" {
+		t.Fatalf("topErrors=%#v", output.TopErrors)
+	}
+	if len(output.ConfirmationSummary) != 1 || output.ConfirmationSummary[0].Status != "executed" {
+		t.Fatalf("confirmationSummary=%#v", output.ConfirmationSummary)
 	}
 }
 

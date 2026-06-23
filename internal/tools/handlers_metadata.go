@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"native-db-bridge-mcp/internal/backend"
 	"native-db-bridge-mcp/internal/nbderrors"
 )
 
@@ -222,6 +223,64 @@ func (h *Handlers) SQLTablePreview(ctx context.Context, input SQLTablePreviewInp
 		Rows:       result.Rows,
 		RowCount:   result.RowCount,
 		Elapsed:    result.Elapsed.Milliseconds(),
+	}
+}
+
+// SQLColumnSearch searches MySQL column metadata without scanning business rows.
+func (h *Handlers) SQLColumnSearch(ctx context.Context, input SQLColumnSearchInput) SQLColumnSearchOutput {
+	ctx, opID := h.withOperation(ctx, "sql_column_search", input.Datasource, "")
+	var opErr error
+	defer func() { h.finishSQLOperation(opID, opErr) }()
+
+	if input.Schema == "" {
+		opErr = fmt.Errorf("schema is required")
+		return SQLColumnSearchOutput{BaseOutput: makeError(nbderrors.CodeQuerySyntaxError, "schema is required")}
+	}
+
+	results, err := h.deps.SQL.ColumnSearch(ctx, backend.SQLColumnSearchRequest{
+		Datasource:    input.Datasource,
+		Schema:        input.Schema,
+		TablePattern:  input.TablePattern,
+		ColumnPattern: input.ColumnPattern,
+		DataTypes:     input.DataTypes,
+		Limit:         input.Limit,
+	})
+	if err != nil {
+		opErr = err
+		return SQLColumnSearchOutput{BaseOutput: makeErrorFromNative(nbderrors.ClassifySQLErrorMessage(err.Error()))}
+	}
+	return SQLColumnSearchOutput{BaseOutput: BaseOutput{OK: true}, Columns: results}
+}
+
+// SQLTextColumnPlan builds a metadata-only text-column scan plan.
+func (h *Handlers) SQLTextColumnPlan(ctx context.Context, input SQLTextColumnPlanInput) SQLTextColumnPlanOutput {
+	ctx, opID := h.withOperation(ctx, "sql_text_column_plan", input.Datasource, "")
+	var opErr error
+	defer func() { h.finishSQLOperation(opID, opErr) }()
+
+	if input.Schema == "" {
+		opErr = fmt.Errorf("schema is required")
+		return SQLTextColumnPlanOutput{BaseOutput: makeError(nbderrors.CodeQuerySyntaxError, "schema is required")}
+	}
+
+	result, err := h.deps.SQL.TextColumnPlan(ctx, backend.SQLTextColumnPlanRequest{
+		Datasource:    input.Datasource,
+		Schema:        input.Schema,
+		TablePattern:  input.TablePattern,
+		ColumnPattern: input.ColumnPattern,
+		Keywords:      input.Keywords,
+		MaxTables:     input.MaxTables,
+		MaxColumns:    input.MaxColumns,
+	})
+	if err != nil {
+		opErr = err
+		return SQLTextColumnPlanOutput{BaseOutput: makeErrorFromNative(nbderrors.ClassifySQLErrorMessage(err.Error()))}
+	}
+	return SQLTextColumnPlanOutput{
+		BaseOutput: BaseOutput{OK: true},
+		Candidates: result.Candidates,
+		Batches:    result.Batches,
+		Warnings:   result.Warnings,
 	}
 }
 

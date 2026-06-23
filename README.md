@@ -100,6 +100,8 @@ NATIVE_DB_BRIDGE_HOME=./var ./native-db-bridge-mcp serve
 | `sql_object_list` | 列出 schema 下的对象 |
 | `sql_object_describe` | 描述表/视图/存储过程结构 |
 | `sql_table_preview` | 预览表数据 |
+| `sql_column_search` | 搜索 MySQL 字段元数据 |
+| `sql_text_column_plan` | 生成文本列扫描计划，不扫描业务数据 |
 | `redis_key_scan` | SCAN 扫描 Redis key |
 | `redis_key_describe` | 描述 Redis key 类型、TTL、长度 |
 | `mongo_database_list` | 列出 MongoDB 数据库 |
@@ -111,6 +113,7 @@ NATIVE_DB_BRIDGE_HOME=./var ./native-db-bridge-mcp serve
 | 工具 | 说明 |
 |------|------|
 | `sql_query` | 只读 SQL 查询（SELECT/SHOW/DESC/EXPLAIN） |
+| `sql_text_scan` | 对指定文本字段执行 count-only 扫描 |
 | `sql_prepare_change` | 准备 SQL 写操作，返回 confirmation |
 | `redis_command` | Redis 只读命令 |
 | `redis_prepare_change` | 准备 Redis 写操作，返回 confirmation |
@@ -125,8 +128,29 @@ NATIVE_DB_BRIDGE_HOME=./var ./native-db-bridge-mcp serve
 | `operation_list` | 列出运行中和近期操作 |
 | `cancel_operation` | 取消运行中的操作 |
 | `audit_recent` | 查询最近审计事件 |
+| `audit_summary` | 聚合审计事件，复盘失败率和慢查询 |
 | `confirmation_get` | 查询 confirmation 状态 |
 | `cancel_confirmation` | 取消 pending 状态的 confirmation |
+
+## Agent MySQL 查询流程
+
+推荐 agent 查询 MySQL 时按以下顺序使用工具：
+
+1. `datasource_list`：确认目标数据源和默认库。
+2. `sql_column_search`：按表名、字段名或类型搜索真实字段，避免直接猜列名。
+3. `sql_text_column_plan`：需要搜索 URL、图片、文本内容时先生成候选文本列和扫描批次。
+4. `sql_text_scan`：对确认过的字段执行 count-only 扫描。
+5. `sql_query`：在字段和范围明确后查询明细。
+6. `audit_summary`：任务结束后按数据源、工具、状态或错误码复盘。
+
+常见错误处理：
+
+- `SQL_UNKNOWN_COLUMN`：先用 `sql_column_search` 搜字段。
+- `SQL_UNKNOWN_TABLE`：先用 `sql_object_list` 搜表。
+- `QUERY_SYNTAX_ERROR`：修正 SQL 语法，不要直接重试。
+- `QUERY_TIMEOUT`：缩小条件，或先用 `sql_text_column_plan` 和 `sql_text_scan` 拆分扫描。
+
+系统诊断类查询如果因为权限失败，例如 `performance_schema`、`SHOW PROCESSLIST`、`SHOW GLOBAL STATUS`，agent 应先保留结构化错误并改用普通 schema 元数据工具或受控文本扫描；需要高权限诊断时，先让用户确认授权边界，不反复重试同一类无权限语句。
 
 ## 写操作流程
 

@@ -100,6 +100,8 @@ Add to your Codex or Claude Code MCP configuration:
 | `sql_object_list` | List objects in a schema |
 | `sql_object_describe` | Describe table/view/stored procedure structure |
 | `sql_table_preview` | Preview table data |
+| `sql_column_search` | Search MySQL column metadata |
+| `sql_text_column_plan` | Build a text-column scan plan without reading business rows |
 | `redis_key_scan` | SCAN Redis keys |
 | `redis_key_describe` | Describe Redis key type, TTL, and length |
 | `mongo_database_list` | List MongoDB databases |
@@ -111,6 +113,7 @@ Add to your Codex or Claude Code MCP configuration:
 | Tool | Description |
 |------|-------------|
 | `sql_query` | Read-only SQL queries (SELECT/SHOW/DESC/EXPLAIN) |
+| `sql_text_scan` | Run count-only scans on selected text columns |
 | `sql_prepare_change` | Prepare a SQL write operation, returns confirmation |
 | `redis_command` | Redis read-only commands |
 | `redis_prepare_change` | Prepare a Redis write operation, returns confirmation |
@@ -125,8 +128,29 @@ Add to your Codex or Claude Code MCP configuration:
 | `operation_list` | List running and recent operations |
 | `cancel_operation` | Cancel a running operation |
 | `audit_recent` | Query recent audit events |
+| `audit_summary` | Summarize audit events for failures and slow queries |
 | `confirmation_get` | Query confirmation status |
 | `cancel_confirmation` | Cancel a pending confirmation |
+
+## Agent MySQL Query Workflow
+
+Agents should query MySQL in this order:
+
+1. `datasource_list`: confirm the target datasource and default database.
+2. `sql_column_search`: search real columns by table, column, or data type before guessing names.
+3. `sql_text_column_plan`: build candidate text columns and scan batches before searching URLs, images, or text content.
+4. `sql_text_scan`: run count-only scans on confirmed fields.
+5. `sql_query`: query details after fields and scope are clear.
+6. `audit_summary`: review failures, slow queries, and error codes after a task.
+
+Common error handling:
+
+- `SQL_UNKNOWN_COLUMN`: use `sql_column_search` first.
+- `SQL_UNKNOWN_TABLE`: use `sql_object_list` first.
+- `QUERY_SYNTAX_ERROR`: fix the SQL; do not retry blindly.
+- `QUERY_TIMEOUT`: narrow the scope, or split the search with `sql_text_column_plan` and `sql_text_scan`.
+
+If system diagnostics such as `performance_schema`, `SHOW PROCESSLIST`, or `SHOW GLOBAL STATUS` fail because of permissions, agents should preserve the structured error and switch to ordinary schema metadata tools or controlled text scans. Higher-privilege diagnostics require explicit user confirmation; do not keep retrying the same permission-limited statement.
 
 ## Write Operation Flow
 

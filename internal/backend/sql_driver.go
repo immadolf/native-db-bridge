@@ -3,13 +3,16 @@ package backend
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	_ "github.com/go-sql-driver/mysql"
 	"native-db-bridge-mcp/internal/config"
 	"native-db-bridge-mcp/internal/lifecycle"
+	"native-db-bridge-mcp/internal/nbderrors"
 )
 
 // sqlResource wraps a *sql.DB to satisfy lifecycle.Resource.
@@ -165,7 +168,7 @@ func (b *SQLDriverBackend) Query(ctx context.Context, datasource string, sqlStr 
 		}
 		row := make(map[string]interface{}, len(columns))
 		for i, c := range columns {
-			row[c.Name()] = values[i]
+			row[c.Name()] = normalizeSQLValue(values[i])
 		}
 		result = append(result, row)
 	}
@@ -398,6 +401,139 @@ func (b *SQLDriverBackend) DescribeObject(ctx context.Context, datasource, schem
 	return result, nil
 }
 
+// ColumnSearch returns matching MySQL columns from information_schema.COLUMNS.
+func (b *SQLDriverBackend) ColumnSearch(ctx context.Context, req SQLColumnSearchRequest) ([]SQLColumnSearchResult, error) {
+	release, err := b.manager.Acquire(ctx, req.Datasource)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	db, err := b.getDB(req.Datasource)
+	if err != nil {
+		return nil, err
+	}
+
+	query, args := buildColumnSearchQuery(req, b.cfg.Server.MaxResultRows)
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("sql column search %s: %w", req.Datasource, err)
+	}
+	defer rows.Close()
+
+	var results []SQLColumnSearchResult
+	for rows.Next() {
+		var item SQLColumnSearchResult
+		var nullable string
+		if err := rows.Scan(&item.Schema, &item.Table, &item.Column, &item.DataType, &item.ColumnType, &nullable, &item.ColumnKey, &item.Comment); err != nil {
+			return nil, fmt.Errorf("sql scan column search %s: %w", req.Datasource, err)
+		}
+		item.Nullable = nullable == "YES"
+		results = append(results, item)
+	}
+	return results, rows.Err()
+}
+
+// TextColumnPlan builds a metadata-only plan for scanning text-like columns.
+func (b *SQLDriverBackend) TextColumnPlan(ctx context.Context, req SQLTextColumnPlanRequest) (SQLTextColumnPlanResult, error) {
+	release, err := b.manager.Acquire(ctx, req.Datasource)
+	if err != nil {
+		return SQLTextColumnPlanResult{}, err
+	}
+	defer release()
+
+	db, err := b.getDB(req.Datasource)
+	if err != nil {
+		return SQLTextColumnPlanResult{}, err
+	}
+
+	query, args := buildTextColumnPlanQuery(req, b.cfg.Server.MaxResultRows)
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return SQLTextColumnPlanResult{}, fmt.Errorf("sql text column plan %s: %w", req.Datasource, err)
+	}
+	defer rows.Close()
+
+	var candidates []SQLTextColumnCandidate
+	for rows.Next() {
+		var item SQLTextColumnCandidate
+		if err := rows.Scan(&item.Schema, &item.Table, &item.Column, &item.DataType, &item.ColumnType); err != nil {
+			return SQLTextColumnPlanResult{}, fmt.Errorf("sql scan text column plan %s: %w", req.Datasource, err)
+		}
+		candidates = append(candidates, item)
+	}
+	if err := rows.Err(); err != nil {
+		return SQLTextColumnPlanResult{}, err
+	}
+
+	var warnings []string
+	if len(candidates) == 0 {
+		warnings = append(warnings, "未找到匹配的文本列，请放宽 table_pattern 或 column_pattern")
+	}
+	if req.MaxTables > 0 && countDistinctTables(candidates) >= req.MaxTables {
+		warnings = append(warnings, "候选表数量达到 max_tables，请进一步收窄范围")
+	}
+	const defaultTextScanBatchSize = 5
+	if len(candidates) > defaultTextScanBatchSize {
+		warnings = append(warnings, fmt.Sprintf("扫描计划按每批最多 %d 个字段给出建议；P0 sql_text_scan 仍按单字段和单关键词逐项执行", defaultTextScanBatchSize))
+	}
+
+	return SQLTextColumnPlanResult{
+		Candidates: candidates,
+		Batches:    buildTextScanBatches(candidates, req.Keywords, defaultTextScanBatchSize),
+		Warnings:   warnings,
+	}, nil
+}
+
+// TextScan executes count-only LIKE scans over explicit text targets.
+func (b *SQLDriverBackend) TextScan(ctx context.Context, req SQLTextScanRequest) (SQLTextScanResult, error) {
+	release, err := b.manager.Acquire(ctx, req.Datasource)
+	if err != nil {
+		return SQLTextScanResult{}, err
+	}
+	defer release()
+
+	db, err := b.getDB(req.Datasource)
+	if err != nil {
+		return SQLTextScanResult{}, err
+	}
+
+	if req.Mode == "" {
+		req.Mode = "count"
+	}
+	if req.Mode != "count" {
+		return SQLTextScanResult{}, fmt.Errorf("unsupported text scan mode %q", req.Mode)
+	}
+
+	var matches []SQLTextScanMatch
+	for _, target := range req.Targets {
+		for _, keyword := range req.Keywords {
+			start := time.Now()
+			query, args := buildTextCountSQL(req.Schema, target, keyword)
+			var count int64
+			queryCtx, cancel := context.WithTimeout(ctx, textScanTimeout(req.Timeout, b.cfg.Server.QueryTimeout.Duration))
+			err := db.QueryRowContext(queryCtx, query, args...).Scan(&count)
+			cancel()
+			match := SQLTextScanMatch{
+				Table:   target.Table,
+				Column:  target.Column,
+				Keyword: keyword,
+				Elapsed: time.Since(start),
+			}
+			if err != nil {
+				classified := nbderrors.ClassifySQLErrorMessage(err.Error())
+				match.Error = err.Error()
+				match.ErrorCode = string(classified.Code)
+				match.TimedOut = classified.Code == nbderrors.CodeQueryTimeout
+			} else {
+				match.Count = count
+			}
+			matches = append(matches, match)
+		}
+	}
+	return SQLTextScanResult{Matches: matches}, nil
+}
+
 // getDB returns the underlying *sql.DB for a datasource.
 func (b *SQLDriverBackend) getDB(datasource string) (*sql.DB, error) {
 	res, ok := b.manager.Get(datasource)
@@ -462,9 +598,141 @@ func buildDSN(baseDSN, database string) string {
 // subquery with a parameter placeholder. If the original query already
 // contains a LIMIT clause, it is returned as-is with hasLimitParam=false.
 func applyLimit(sqlStr string, limit int) (string, bool) {
-	upper := strings.ToUpper(strings.TrimSpace(sqlStr))
-	if strings.Contains(upper, " LIMIT ") {
-		return sqlStr, false
+	normalized := trimTrailingSemicolon(sqlStr)
+	upper := strings.ToUpper(strings.TrimSpace(normalized))
+	if isReadMetadataStatement(upper) {
+		return normalized, false
 	}
-	return fmt.Sprintf("SELECT * FROM (%s) AS ndb_limited LIMIT ?", sqlStr), true
+	if strings.Contains(upper, " LIMIT ") {
+		return normalized, false
+	}
+	return fmt.Sprintf("SELECT * FROM (%s) AS ndb_limited LIMIT ?", normalized), true
+}
+
+func trimTrailingSemicolon(sqlStr string) string {
+	trimmed := strings.TrimSpace(sqlStr)
+	for strings.HasSuffix(trimmed, ";") {
+		trimmed = strings.TrimSpace(strings.TrimSuffix(trimmed, ";"))
+	}
+	return trimmed
+}
+
+func isReadMetadataStatement(upper string) bool {
+	return strings.HasPrefix(upper, "SHOW ") ||
+		strings.HasPrefix(upper, "DESCRIBE ") ||
+		strings.HasPrefix(upper, "DESC ") ||
+		strings.HasPrefix(upper, "EXPLAIN ")
+}
+
+func normalizeSQLValue(value interface{}) interface{} {
+	if value == nil {
+		return nil
+	}
+	bytes, ok := value.([]byte)
+	if !ok {
+		return value
+	}
+	if utf8.Valid(bytes) {
+		return string(bytes)
+	}
+	return map[string]interface{}{
+		"encoding": "base64",
+		"data":     base64.StdEncoding.EncodeToString(bytes),
+	}
+}
+
+func buildColumnSearchQuery(req SQLColumnSearchRequest, maxRows int) (string, []interface{}) {
+	limit := req.Limit
+	if limit <= 0 || limit > maxRows {
+		limit = maxRows
+	}
+
+	query := "SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_COMMENT FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ?"
+	args := []interface{}{req.Schema}
+	if req.TablePattern != "" {
+		query += " AND TABLE_NAME LIKE ?"
+		args = append(args, req.TablePattern)
+	}
+	if req.ColumnPattern != "" {
+		query += " AND COLUMN_NAME LIKE ?"
+		args = append(args, req.ColumnPattern)
+	}
+	if len(req.DataTypes) > 0 {
+		placeholders := strings.TrimRight(strings.Repeat("?, ", len(req.DataTypes)), ", ")
+		query += " AND DATA_TYPE IN (" + placeholders + ")"
+		for _, dataType := range req.DataTypes {
+			args = append(args, dataType)
+		}
+	}
+	query += " ORDER BY TABLE_NAME, ORDINAL_POSITION LIMIT ?"
+	args = append(args, limit)
+	return query, args
+}
+
+func buildTextColumnPlanQuery(req SQLTextColumnPlanRequest, maxRows int) (string, []interface{}) {
+	limit := req.MaxColumns
+	if limit <= 0 || limit > maxRows {
+		limit = maxRows
+	}
+	textTypes := []string{"char", "varchar", "tinytext", "text", "mediumtext", "longtext", "json"}
+	query := "SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE, COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND DATA_TYPE IN (?, ?, ?, ?, ?, ?, ?)"
+	args := []interface{}{req.Schema}
+	for _, textType := range textTypes {
+		args = append(args, textType)
+	}
+	if req.TablePattern != "" {
+		query += " AND TABLE_NAME LIKE ?"
+		args = append(args, req.TablePattern)
+	}
+	if req.ColumnPattern != "" {
+		query += " AND COLUMN_NAME LIKE ?"
+		args = append(args, req.ColumnPattern)
+	}
+	query += " ORDER BY TABLE_NAME, ORDINAL_POSITION LIMIT ?"
+	args = append(args, limit)
+	return query, args
+}
+
+func buildTextScanBatches(candidates []SQLTextColumnCandidate, keywords []string, maxTargets int) []SQLTextScanBatch {
+	if maxTargets <= 0 {
+		maxTargets = 5
+	}
+	var batches []SQLTextScanBatch
+	for start := 0; start < len(candidates); start += maxTargets {
+		end := start + maxTargets
+		if end > len(candidates) {
+			end = len(candidates)
+		}
+		var targets []SQLTextScanTarget
+		for _, candidate := range candidates[start:end] {
+			targets = append(targets, SQLTextScanTarget{Table: candidate.Table, Column: candidate.Column})
+		}
+		batches = append(batches, SQLTextScanBatch{Targets: targets, Keywords: keywords})
+	}
+	return batches
+}
+
+func countDistinctTables(candidates []SQLTextColumnCandidate) int {
+	seen := map[string]struct{}{}
+	for _, candidate := range candidates {
+		seen[candidate.Table] = struct{}{}
+	}
+	return len(seen)
+}
+
+func buildTextCountSQL(schema string, target SQLTextScanTarget, keyword string) (string, []interface{}) {
+	sqlStr := fmt.Sprintf("SELECT COUNT(*) FROM `%s`.`%s` WHERE `%s` LIKE ?",
+		escapeIdentifier(schema), escapeIdentifier(target.Table), escapeIdentifier(target.Column))
+	return sqlStr, []interface{}{"%" + keyword + "%"}
+}
+
+func escapeIdentifier(identifier string) string {
+	return strings.ReplaceAll(identifier, "`", "``")
+}
+
+func textScanTimeout(requested time.Duration, global time.Duration) time.Duration {
+	if requested <= 0 || requested > global {
+		return global
+	}
+	return requested
 }

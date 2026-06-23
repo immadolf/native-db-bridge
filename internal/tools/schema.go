@@ -4,7 +4,7 @@ package tools
 
 import "native-db-bridge-mcp/internal/backend"
 
-// ToolNames returns the complete list of all 24 MCP tool names.
+// ToolNames returns the complete list of all 28 MCP tool names.
 func ToolNames() []string {
 	return []string{
 		// Metadata tools
@@ -15,6 +15,8 @@ func ToolNames() []string {
 		"sql_object_list",
 		"sql_object_describe",
 		"sql_table_preview",
+		"sql_column_search",
+		"sql_text_column_plan",
 		"redis_key_scan",
 		"redis_key_describe",
 		"mongo_database_list",
@@ -22,6 +24,7 @@ func ToolNames() []string {
 		"mongo_collection_describe",
 		// Execution tools
 		"sql_query",
+		"sql_text_scan",
 		"sql_prepare_change",
 		"redis_command",
 		"redis_prepare_change",
@@ -32,6 +35,7 @@ func ToolNames() []string {
 		"operation_list",
 		"cancel_operation",
 		"audit_recent",
+		"audit_summary",
 		"confirmation_get",
 		"cancel_confirmation",
 	}
@@ -65,10 +69,10 @@ type SQLObjectTypeListInput struct {
 
 // SQLObjectListInput is the input for the sql_object_list tool.
 type SQLObjectListInput struct {
-	Datasource   string `json:"datasource"`
-	Schema       string `json:"schema"`
-	ObjectType   string `json:"object_type"`
-	NamePattern  string `json:"name_pattern,omitempty"`
+	Datasource  string `json:"datasource"`
+	Schema      string `json:"schema"`
+	ObjectType  string `json:"object_type"`
+	NamePattern string `json:"name_pattern,omitempty"`
 }
 
 // SQLObjectDescribeInput is the input for the sql_object_describe tool.
@@ -85,6 +89,27 @@ type SQLTablePreviewInput struct {
 	Schema     string `json:"schema"`
 	Table      string `json:"table"`
 	Limit      int    `json:"limit,omitempty"`
+}
+
+// SQLColumnSearchInput is the input for the sql_column_search tool.
+type SQLColumnSearchInput struct {
+	Datasource    string   `json:"datasource"`
+	Schema        string   `json:"schema"`
+	TablePattern  string   `json:"table_pattern,omitempty"`
+	ColumnPattern string   `json:"column_pattern,omitempty"`
+	DataTypes     []string `json:"data_types,omitempty"`
+	Limit         int      `json:"limit,omitempty"`
+}
+
+// SQLTextColumnPlanInput is the input for the sql_text_column_plan tool.
+type SQLTextColumnPlanInput struct {
+	Datasource    string   `json:"datasource"`
+	Schema        string   `json:"schema"`
+	TablePattern  string   `json:"table_pattern,omitempty"`
+	ColumnPattern string   `json:"column_pattern,omitempty"`
+	Keywords      []string `json:"keywords,omitempty"`
+	MaxTables     int      `json:"max_tables,omitempty"`
+	MaxColumns    int      `json:"max_columns,omitempty"`
 }
 
 // RedisKeyScanInput is the input for the redis_key_scan tool.
@@ -124,6 +149,17 @@ type SQLQueryInput struct {
 	SQL        string `json:"sql"`
 	Limit      int    `json:"limit,omitempty"`
 	Timeout    string `json:"timeout,omitempty"`
+}
+
+// SQLTextScanInput is the input for the sql_text_scan tool.
+type SQLTextScanInput struct {
+	Datasource         string                      `json:"datasource"`
+	Schema             string                      `json:"schema"`
+	Targets            []backend.SQLTextScanTarget `json:"targets"`
+	Keywords           []string                    `json:"keywords"`
+	Mode               string                      `json:"mode,omitempty"`
+	MaxColumnsPerQuery int                         `json:"max_columns_per_query,omitempty"`
+	Timeout            string                      `json:"timeout,omitempty"`
 }
 
 // SQLPrepareChangeInput is the input for the sql_prepare_change tool.
@@ -197,6 +233,17 @@ type AuditRecentInput struct {
 	Limit      int    `json:"limit,omitempty"`
 }
 
+// AuditSummaryInput is the input for the audit_summary tool.
+type AuditSummaryInput struct {
+	StartTime  string `json:"start_time,omitempty"`
+	EndTime    string `json:"end_time,omitempty"`
+	Datasource string `json:"datasource,omitempty"`
+	EventType  string `json:"event_type,omitempty"`
+	Status     string `json:"status,omitempty"`
+	GroupBy    string `json:"group_by,omitempty"`
+	Limit      int    `json:"limit,omitempty"`
+}
+
 // ConfirmationGetInput is the input for the confirmation_get tool.
 type ConfirmationGetInput struct {
 	ConfirmationID string `json:"confirmation_id"`
@@ -213,8 +260,8 @@ type CancelConfirmationInput struct {
 
 // BaseOutput is the common envelope for all tool responses.
 type BaseOutput struct {
-	OK          bool   `json:"ok"`
-	OperationID string `json:"operation_id,omitempty"`
+	OK          bool         `json:"ok"`
+	OperationID string       `json:"operation_id,omitempty"`
 	Error       *ErrorOutput `json:"error,omitempty"`
 }
 
@@ -283,10 +330,24 @@ type SQLObjectDescribeOutput struct {
 // SQLTablePreviewOutput is the output for the sql_table_preview tool.
 type SQLTablePreviewOutput struct {
 	BaseOutput
-	Columns  []ColumnInfo            `json:"columns"`
+	Columns  []ColumnInfo             `json:"columns"`
 	Rows     []map[string]interface{} `json:"rows"`
 	RowCount int                      `json:"row_count"`
 	Elapsed  int64                    `json:"elapsed_ms"`
+}
+
+// SQLColumnSearchOutput is the output for the sql_column_search tool.
+type SQLColumnSearchOutput struct {
+	BaseOutput
+	Columns []backend.SQLColumnSearchResult `json:"columns"`
+}
+
+// SQLTextColumnPlanOutput is the output for the sql_text_column_plan tool.
+type SQLTextColumnPlanOutput struct {
+	BaseOutput
+	Candidates []backend.SQLTextColumnCandidate `json:"candidates"`
+	Batches    []backend.SQLTextScanBatch       `json:"batches"`
+	Warnings   []string                         `json:"warnings,omitempty"`
 }
 
 // ColumnInfo describes a column in a SQL result set (matches backend.ColumnInfo).
@@ -341,19 +402,37 @@ type MongoIndexInfo struct {
 // MongoCollectionDescribeOutput is the output for the mongo_collection_describe tool.
 type MongoCollectionDescribeOutput struct {
 	BaseOutput
-	Collection     string                   `json:"collection"`
-	EstimatedCount int64                    `json:"estimated_count"`
-	Indexes        []MongoIndexInfo         `json:"indexes"`
-	SampleSchema   map[string]interface{}   `json:"sample_schema,omitempty"`
+	Collection     string                 `json:"collection"`
+	EstimatedCount int64                  `json:"estimated_count"`
+	Indexes        []MongoIndexInfo       `json:"indexes"`
+	SampleSchema   map[string]interface{} `json:"sample_schema,omitempty"`
 }
 
 // SQLQueryOutput is the output for the sql_query tool.
 type SQLQueryOutput struct {
 	BaseOutput
-	Columns  []ColumnInfo            `json:"columns"`
+	Columns  []ColumnInfo             `json:"columns"`
 	Rows     []map[string]interface{} `json:"rows"`
 	RowCount int                      `json:"row_count"`
 	Elapsed  int64                    `json:"elapsed_ms"`
+}
+
+// SQLTextScanOutput is the output for the sql_text_scan tool.
+type SQLTextScanOutput struct {
+	BaseOutput
+	Matches []SQLTextScanMatchOutput `json:"matches"`
+}
+
+// SQLTextScanMatchOutput describes one text scan match in milliseconds.
+type SQLTextScanMatchOutput struct {
+	Table     string `json:"table"`
+	Column    string `json:"column"`
+	Keyword   string `json:"keyword"`
+	Count     int64  `json:"count"`
+	ElapsedMs int64  `json:"elapsed_ms"`
+	TimedOut  bool   `json:"timed_out,omitempty"`
+	Error     string `json:"error,omitempty"`
+	ErrorCode string `json:"error_code,omitempty"`
 }
 
 // SQLPrepareChangeOutput is the output for the sql_prepare_change tool.
@@ -419,16 +498,16 @@ type ExecuteConfirmationOutput struct {
 
 // OperationInfo describes a single operation in the operations list.
 type OperationInfo struct {
-	OperationID        string  `json:"operation_id"`
-	Kind               string  `json:"kind"`
-	Datasource         string  `json:"datasource"`
-	Status             string  `json:"status"`
-	StartedAt          string  `json:"started_at"`
-	FinishedAt         *string `json:"finished_at,omitempty"`
-	CancelRequestedAt  *string `json:"cancel_requested_at,omitempty"`
-	ConfirmationID     *string `json:"confirmation_id,omitempty"`
-	ErrorCode          *string `json:"error_code,omitempty"`
-	ErrorSummary       *string `json:"error_summary,omitempty"`
+	OperationID       string  `json:"operation_id"`
+	Kind              string  `json:"kind"`
+	Datasource        string  `json:"datasource"`
+	Status            string  `json:"status"`
+	StartedAt         string  `json:"started_at"`
+	FinishedAt        *string `json:"finished_at,omitempty"`
+	CancelRequestedAt *string `json:"cancel_requested_at,omitempty"`
+	ConfirmationID    *string `json:"confirmation_id,omitempty"`
+	ErrorCode         *string `json:"error_code,omitempty"`
+	ErrorSummary      *string `json:"error_summary,omitempty"`
 }
 
 // OperationListOutput is the output for the operation_list tool.
@@ -462,6 +541,43 @@ type AuditEventInfo struct {
 type AuditRecentOutput struct {
 	BaseOutput
 	Events []AuditEventInfo `json:"events"`
+}
+
+// AuditSummaryOutput is the output for the audit_summary tool.
+type AuditSummaryOutput struct {
+	BaseOutput
+	Rows                []AuditSummaryRow                `json:"rows"`
+	TopErrors           []AuditTopErrorSummary           `json:"top_errors"`
+	ConfirmationSummary []AuditConfirmationSummaryOutput `json:"confirmation_summary"`
+}
+
+// AuditSummaryRow describes one grouped audit summary row.
+type AuditSummaryRow struct {
+	Bucket       string `json:"bucket"`
+	EventType    string `json:"event_type"`
+	Datasource   string `json:"datasource"`
+	Status       string `json:"status"`
+	ErrorCode    string `json:"error_code,omitempty"`
+	Count        int    `json:"count"`
+	Slow1sCount  int    `json:"slow_1s_count"`
+	Slow5sCount  int    `json:"slow_5s_count"`
+	Slow10sCount int    `json:"slow_10s_count"`
+}
+
+// AuditTopErrorSummary describes one representative failed audit summary.
+type AuditTopErrorSummary struct {
+	ErrorCode string `json:"error_code"`
+	Summary   string `json:"summary"`
+	Count     int    `json:"count"`
+}
+
+// AuditConfirmationSummaryOutput describes confirmation status counts.
+type AuditConfirmationSummaryOutput struct {
+	Kind       string `json:"kind"`
+	Datasource string `json:"datasource"`
+	Status     string `json:"status"`
+	Count      int    `json:"count"`
+	ErrorCount int    `json:"error_count"`
 }
 
 // ConfirmationInfo describes the current state of a confirmation.

@@ -39,9 +39,10 @@ func (h *Handlers) SQLQuery(ctx context.Context, input SQLQueryInput) SQLQueryOu
 
 	result, err := h.deps.SQL.Query(ctx, input.Datasource, input.SQL, limit)
 	if err != nil {
-		h.recordAuditEvent("sql_query", input.Datasource, opID, "", input.SQL, "error", 0, 0, err)
-		h.finishOperation(opID, err)
-		return SQLQueryOutput{BaseOutput: makeError(nbderrors.CodeDriverError, err.Error()).withOpID(opID)}
+		h.recordSQLAuditEvent("sql_query", input.Datasource, opID, "", input.SQL, "error", 0, 0, err)
+		classified := nbderrors.ClassifySQLErrorMessage(err.Error())
+		h.finishSQLOperation(opID, err)
+		return SQLQueryOutput{BaseOutput: makeErrorFromNative(classified).withOpID(opID)}
 	}
 
 	cols := make([]ColumnInfo, len(result.Columns))
@@ -60,6 +61,55 @@ func (h *Handlers) SQLQuery(ctx context.Context, input SQLQueryInput) SQLQueryOu
 		RowCount:   result.RowCount,
 		Elapsed:    result.Elapsed.Milliseconds(),
 	}
+}
+
+// SQLTextScan executes controlled count-only text scans.
+func (h *Handlers) SQLTextScan(ctx context.Context, input SQLTextScanInput) SQLTextScanOutput {
+	ctx, opID := h.withOperation(ctx, "sql_text_scan", input.Datasource, "")
+	var opErr error
+	defer func() { h.finishSQLOperation(opID, opErr) }()
+
+	if input.Schema == "" {
+		opErr = fmt.Errorf("schema is required")
+		return SQLTextScanOutput{BaseOutput: makeError(nbderrors.CodeQuerySyntaxError, "schema is required")}
+	}
+	if len(input.Targets) == 0 {
+		opErr = fmt.Errorf("targets are required")
+		return SQLTextScanOutput{BaseOutput: makeError(nbderrors.CodeQuerySyntaxError, "targets are required")}
+	}
+	if len(input.Keywords) == 0 {
+		opErr = fmt.Errorf("keywords are required")
+		return SQLTextScanOutput{BaseOutput: makeError(nbderrors.CodeQuerySyntaxError, "keywords are required")}
+	}
+
+	result, err := h.deps.SQL.TextScan(ctx, backend.SQLTextScanRequest{
+		Datasource:         input.Datasource,
+		Schema:             input.Schema,
+		Targets:            input.Targets,
+		Keywords:           input.Keywords,
+		Mode:               input.Mode,
+		MaxColumnsPerQuery: input.MaxColumnsPerQuery,
+		Timeout:            h.parseTimeout(input.Timeout),
+	})
+	if err != nil {
+		opErr = err
+		return SQLTextScanOutput{BaseOutput: makeErrorFromNative(nbderrors.ClassifySQLErrorMessage(err.Error()))}
+	}
+
+	matches := make([]SQLTextScanMatchOutput, 0, len(result.Matches))
+	for _, match := range result.Matches {
+		matches = append(matches, SQLTextScanMatchOutput{
+			Table:     match.Table,
+			Column:    match.Column,
+			Keyword:   match.Keyword,
+			Count:     match.Count,
+			ElapsedMs: match.Elapsed.Milliseconds(),
+			TimedOut:  match.TimedOut,
+			Error:     match.Error,
+			ErrorCode: match.ErrorCode,
+		})
+	}
+	return SQLTextScanOutput{BaseOutput: BaseOutput{OK: true}, Matches: matches}
 }
 
 // SQLPrepareChange creates a confirmation for a SQL write operation.
@@ -428,6 +478,17 @@ func (h *Handlers) ExecuteConfirmation(ctx context.Context, input ExecuteConfirm
 
 	if execErr != nil {
 		_ = h.deps.Audit.MarkConfirmationFailed(input.ConfirmationID, execErr.Error())
+		if isSQLConfirmationKind(conf.Kind) {
+			h.recordSQLAuditEvent("execute_confirmation", conf.Datasource, opID, input.ConfirmationID,
+				conf.Summary, "error", 0, 0, execErr)
+			classified := nbderrors.ClassifySQLErrorMessage(execErr.Error())
+			h.finishSQLOperation(opID, execErr)
+			return ExecuteConfirmationOutput{
+				BaseOutput:     makeErrorFromNative(classified).withOpID(opID),
+				ConfirmationID: input.ConfirmationID,
+				Status:         "failed",
+			}
+		}
 		h.recordAuditEvent("execute_confirmation", conf.Datasource, opID, input.ConfirmationID,
 			conf.Summary, "error", 0, 0, execErr)
 		h.finishOperation(opID, execErr)
@@ -460,6 +521,10 @@ func (h *Handlers) ExecuteConfirmation(ctx context.Context, input ExecuteConfirm
 		ResultSummary:  fmt.Sprintf("affected %d rows", execResult.AffectedCount),
 		Elapsed:        execResult.Elapsed.Milliseconds(),
 	}
+}
+
+func isSQLConfirmationKind(kind string) bool {
+	return kind == "sql_dml" || kind == "sql_ddl"
 }
 
 // CancelConfirmation cancels a pending confirmation.
@@ -634,6 +699,122 @@ func (h *Handlers) AuditRecent(ctx context.Context, input AuditRecentInput) Audi
 	return AuditRecentOutput{
 		BaseOutput: BaseOutput{OK: true},
 		Events:     results,
+	}
+}
+
+// AuditSummary returns grouped audit events, top failures, and confirmation summaries.
+func (h *Handlers) AuditSummary(ctx context.Context, input AuditSummaryInput) AuditSummaryOutput {
+	_, opID := h.withOperation(ctx, "audit_summary", "", "")
+	var opErr error
+	defer func() { h.finishOperation(opID, opErr) }()
+
+	if !isAllowedAuditSummaryGroupBy(input.GroupBy) {
+		opErr = fmt.Errorf("unsupported group_by %q", input.GroupBy)
+		return AuditSummaryOutput{BaseOutput: makeError(nbderrors.CodeQuerySyntaxError, fmt.Sprintf("unsupported group_by %q", input.GroupBy))}
+	}
+
+	startTime, err := parseOptionalTime(input.StartTime)
+	if err != nil {
+		opErr = err
+		return AuditSummaryOutput{BaseOutput: makeError(nbderrors.CodeQuerySyntaxError, err.Error())}
+	}
+	endTime, err := parseOptionalTime(input.EndTime)
+	if err != nil {
+		opErr = err
+		return AuditSummaryOutput{BaseOutput: makeError(nbderrors.CodeQuerySyntaxError, err.Error())}
+	}
+
+	filter := audit.SummaryFilter{
+		StartTime:  startTime,
+		EndTime:    endTime,
+		Datasource: input.Datasource,
+		EventType:  input.EventType,
+		Status:     input.Status,
+		GroupBy:    input.GroupBy,
+		Limit:      input.Limit,
+	}
+
+	rows, err := h.deps.Audit.Summary(filter)
+	if err != nil {
+		opErr = err
+		return AuditSummaryOutput{BaseOutput: makeError(nbderrors.CodeInternalError, err.Error())}
+	}
+	topErrorFilter := filter
+	topErrorFilter.Status = ""
+	topErrors, err := h.deps.Audit.TopErrorSummaries(topErrorFilter)
+	if err != nil {
+		opErr = err
+		return AuditSummaryOutput{BaseOutput: makeError(nbderrors.CodeInternalError, err.Error())}
+	}
+	confirmationFilter := audit.SummaryFilter{
+		StartTime:  startTime,
+		EndTime:    endTime,
+		Datasource: input.Datasource,
+		Limit:      input.Limit,
+	}
+	confirmations, err := h.deps.Audit.ConfirmationSummary(confirmationFilter)
+	if err != nil {
+		opErr = err
+		return AuditSummaryOutput{BaseOutput: makeError(nbderrors.CodeInternalError, err.Error())}
+	}
+
+	out := make([]AuditSummaryRow, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, AuditSummaryRow{
+			Bucket:       row.Bucket,
+			EventType:    row.EventType,
+			Datasource:   row.Datasource,
+			Status:       row.Status,
+			ErrorCode:    row.ErrorCode,
+			Count:        row.Count,
+			Slow1sCount:  row.Slow1sCount,
+			Slow5sCount:  row.Slow5sCount,
+			Slow10sCount: row.Slow10sCount,
+		})
+	}
+	top := make([]AuditTopErrorSummary, 0, len(topErrors))
+	for _, row := range topErrors {
+		top = append(top, AuditTopErrorSummary{
+			ErrorCode: row.ErrorCode,
+			Summary:   row.Summary,
+			Count:     row.Count,
+		})
+	}
+	confirmationOut := make([]AuditConfirmationSummaryOutput, 0, len(confirmations))
+	for _, row := range confirmations {
+		confirmationOut = append(confirmationOut, AuditConfirmationSummaryOutput{
+			Kind:       row.Kind,
+			Datasource: row.Datasource,
+			Status:     row.Status,
+			Count:      row.Count,
+			ErrorCount: row.ErrorCount,
+		})
+	}
+	return AuditSummaryOutput{
+		BaseOutput:          BaseOutput{OK: true},
+		Rows:                out,
+		TopErrors:           top,
+		ConfirmationSummary: confirmationOut,
+	}
+}
+
+func parseOptionalTime(value string) (time.Time, error) {
+	if value == "" {
+		return time.Time{}, nil
+	}
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("time %q must be RFC3339", value)
+	}
+	return parsed, nil
+}
+
+func isAllowedAuditSummaryGroupBy(value string) bool {
+	switch value {
+	case "", "day", "event_type", "datasource", "status", "error_code":
+		return true
+	default:
+		return false
 	}
 }
 

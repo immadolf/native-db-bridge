@@ -31,6 +31,8 @@ const (
 	CodeConnectionAuthFailed            Code = "CONNECTION_AUTH_FAILED"
 	CodeQueryTimeout                    Code = "QUERY_TIMEOUT"
 	CodeQuerySyntaxError                Code = "QUERY_SYNTAX_ERROR"
+	CodeSQLUnknownColumn                Code = "SQL_UNKNOWN_COLUMN"
+	CodeSQLUnknownTable                 Code = "SQL_UNKNOWN_TABLE"
 	CodeQueryLockingReadRejected        Code = "QUERY_LOCKING_READ_REJECTED"
 	CodeConfirmationNotFound            Code = "CONFIRMATION_NOT_FOUND"
 	CodeConfirmationExpired             Code = "CONFIRMATION_EXPIRED"
@@ -61,9 +63,9 @@ func (e *Error) Error() string {
 // New creates an Error with auto-assigned category and retryable flag.
 func New(code Code, message string) *Error {
 	return &Error{
-		Code:     code,
-		Category: categoryFor(code),
-		Message:  message,
+		Code:      code,
+		Category:  categoryFor(code),
+		Message:   message,
 		Retryable: retryableFor(code),
 	}
 }
@@ -97,7 +99,7 @@ func categoryFor(code Code) Category {
 		return CategoryPolicy
 	case CodeConnectionFailed, CodeConnectionAuthFailed:
 		return CategoryConnection
-	case CodeQuerySyntaxError:
+	case CodeQuerySyntaxError, CodeSQLUnknownColumn, CodeSQLUnknownTable:
 		return CategorySyntax
 	case CodeQueryTimeout:
 		return CategoryTimeout
